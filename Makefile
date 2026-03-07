@@ -1,12 +1,11 @@
-.PHONY: test demo clean
+.PHONY: test clean
 
 test:
-	python3 -m unittest discover tests
+	python3 -m pytest tests/ -v
 
-demo:
-	bin/repack demo/demo.py
+test-unit:
+	python3 -m unittest discover tests/ -v
 
 clean:
-	rm -rf demo/repack_status.csv demo/output
-	find . -name "*.pyc" -delete
-	find . -name "__pycache__" -delete
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete 2>/dev/null || true

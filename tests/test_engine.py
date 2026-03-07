@@ -1,160 +1,319 @@
+"""Tests for Engine, focusing on false-negative prevention."""
+
+import os
+import tempfile
 import unittest
-from unittest.mock import MagicMock, call
-from typing import List, Dict, Callable
+from typing import Any, Dict, List
 
-from repack.core.kit import Kit, KitTarget
-from repack.core.request import RepackRequest
-from repack.core.state import StateManager, TargetStatus
-from repack.executor.base import Executor, Job
-from repack.engine.manager import RepackEngine
+from kitdag.core.kit import Kit, KitInput, KitOutput
+from kitdag.core.target import KitTarget, TargetStatus
+from kitdag.engine.local import LocalEngine
+from kitdag.pipeline import PipelineConfig, StepConfig
 
-class MockKit(Kit):
-    def __init__(self, name, dependencies=None):
-        super().__init__(name)
-        self._dependencies = dependencies or []
 
-    def get_output_path(self, request):
-        return f"/tmp/{self.name}"
+# ---------------------------------------------------------------------------
+# Test kit implementations
+# ---------------------------------------------------------------------------
 
-    def get_targets(self, request):
-        return [KitTarget(self.name, pvt="default")]
+class SimpleKit(Kit):
+    """Test kit that creates expected output."""
 
-    def get_dependencies(self):
-        return self._dependencies
+    name = "simple"
+    base_command = "sh"
 
-    def construct_command(self, target, request):
-        return ["echo", target.id]
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
 
-class MockExecutor(Executor):
-    def __init__(self):
-        self.submitted_jobs = []
-        self.callbacks = {}
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        out = os.path.join(out_dir, "output.txt")
+        return ["-c", f"mkdir -p {out_dir} && echo 'ok' > {out}"]
 
-    def submit(self, job: Job, dependency_job_ids: List[str] = None, on_complete: Callable[[str, bool], None] = None) -> str:
-        self.submitted_jobs.append((job, dependency_job_ids))
-        if on_complete:
-            self.callbacks[job.id] = on_complete
-        return job.id
 
-    def wait(self, job_ids):
-        # Simulate completion
-        for jid in job_ids:
-            if jid in self.callbacks:
-                # Simulate success
-                self.callbacks[jid](jid, True)
+class FailKit(Kit):
+    """Test kit that always fails."""
 
-class TestRepackEngine(unittest.TestCase):
-    def setUp(self):
-        self.request = RepackRequest(
-            library_name="mylib", pvts=["default"], corners=["tt"], cells=["inv"], output_root="/tmp"
+    name = "fail"
+    base_command = "sh"
+
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        return ["-c", "exit 1"]
+
+
+class LogErrorKit(Kit):
+    """Test kit that succeeds (exit 0) but has ERROR in log.
+
+    Tests false-negative #2: log has ERROR but return code is 0.
+    """
+
+    name = "logerr"
+    base_command = "sh"
+
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        out = os.path.join(out_dir, "output.txt")
+        return ["-c", f"mkdir -p {out_dir} && echo 'ok' > {out} && echo 'ERROR: something went wrong'"]
+
+
+class PvtKit(Kit):
+    """Test kit with per-PVT outputs."""
+
+    name = "pvt_kit"
+    base_command = "sh"
+    pvt_key = "pvts"
+
+    inputs = [
+        KitInput("library_name"),
+        KitInput("pvts", type="string[]"),
+    ]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        lib_name = inputs.get("library_name", "test")
+        pvts = inputs.get("pvts", [])
+
+        cmds = []
+        for pvt in pvts:
+            pvt_dir = os.path.join(out_dir, pvt)
+            out_file = os.path.join(pvt_dir, f"{lib_name}_{pvt}.lib")
+            cmds.append(f"mkdir -p {pvt_dir} && echo 'ok' > {out_file}")
+
+        return ["-c", " && ".join(cmds)] if cmds else ["-c", "true"]
+
+    def get_expected_pvt_outputs(self, pvt: str, inputs: Dict[str, Any]) -> List[str]:
+        lib_name = inputs.get("library_name", "test")
+        return [f"{pvt}/{lib_name}_{pvt}.lib"]
+
+
+class PvtMissingKit(Kit):
+    """Kit that claims per-PVT outputs but doesn't create them all."""
+
+    name = "pvt_missing"
+    base_command = "sh"
+    pvt_key = "pvts"
+
+    inputs = [
+        KitInput("library_name"),
+        KitInput("pvts", type="string[]"),
+    ]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        lib_name = inputs.get("library_name", "test")
+        pvts = inputs.get("pvts", [])
+
+        # Only create output for the first PVT
+        if pvts:
+            pvt = pvts[0]
+            pvt_dir = os.path.join(out_dir, pvt)
+            out_file = os.path.join(pvt_dir, f"{lib_name}_{pvt}.lib")
+            return ["-c", f"mkdir -p {pvt_dir} && echo 'ok' > {out_file}"]
+        return ["-c", "true"]
+
+    def get_expected_pvt_outputs(self, pvt: str, inputs: Dict[str, Any]) -> List[str]:
+        lib_name = inputs.get("library_name", "test")
+        return [f"{pvt}/{lib_name}_{pvt}.lib"]
+
+
+# ---------------------------------------------------------------------------
+# Helper to build pipeline configs
+# ---------------------------------------------------------------------------
+
+def _make_pipeline(tmpdir: str, kit_name: str = "simple",
+                   deps: List[str] = None,
+                   inputs: Dict[str, Any] = None) -> PipelineConfig:
+    """Create a single-step pipeline for testing."""
+    step_inputs = inputs or {"library_name": "test_lib"}
+    return PipelineConfig(
+        steps={
+            kit_name: StepConfig(
+                name=kit_name,
+                run=kit_name,
+                inputs=step_inputs,
+                output_dir=os.path.join(tmpdir, kit_name),
+                log_path=os.path.join(tmpdir, kit_name, f"{kit_name}.log"),
+                dependencies=deps or [],
+            ),
+        },
+        output_root=tmpdir,
+        executor="local",
+        max_workers=2,
+    )
+
+
+def _make_multi_pipeline(tmpdir: str, steps_config: Dict) -> PipelineConfig:
+    """Create a multi-step pipeline for testing.
+
+    steps_config: {name: {"run": kit_name, "deps": [...], "inputs": {...}}}
+    """
+    steps = {}
+    for name, cfg in steps_config.items():
+        run = cfg.get("run", name)
+        steps[name] = StepConfig(
+            name=name,
+            run=run,
+            inputs=cfg.get("inputs", {"library_name": "test_lib"}),
+            output_dir=os.path.join(tmpdir, name),
+            log_path=os.path.join(tmpdir, name, f"{name}.log"),
+            dependencies=cfg.get("deps", []),
         )
-        self.state_manager = MagicMock(spec=StateManager)
-        self.executor = MockExecutor()
+    return PipelineConfig(
+        steps=steps,
+        output_root=tmpdir,
+        executor="local",
+        max_workers=2,
+    )
 
-        # Define Kits
-        # C -> B -> A (A depends on B, B depends on C)
-        self.kit_c = MockKit("KitC")
-        self.kit_b = MockKit("KitB", dependencies=["KitC"])
-        self.kit_a = MockKit("KitA", dependencies=["KitB"])
 
-        self.kits = [self.kit_a, self.kit_b, self.kit_c]
-        self.engine = RepackEngine(self.kits, self.state_manager, self.executor)
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
-    def test_full_run_execution_order(self):
-        """
-        All targets are PENDING. Should run C -> B -> A.
-        """
-        self.state_manager.initialize.return_value = False # Full run
-        self.state_manager.get_status.return_value = TargetStatus.PENDING
+class TestEngineBasic(unittest.TestCase):
 
-        self.engine.run(self.request)
+    def test_simple_pass(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "simple")
+            kits = {"simple": SimpleKit()}
+            engine = LocalEngine(pipeline, kits)
+            self.assertTrue(engine.run())
 
-        submitted = self.executor.submitted_jobs
-        self.assertEqual(len(submitted), 3)
+    def test_fail_kit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "fail")
+            kits = {"fail": FailKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            self.assertFalse(engine.run())
 
-        # Verify order and dependencies
-        job_c, deps_c = submitted[0]
-        job_b, deps_b = submitted[1]
-        job_a, deps_a = submitted[2]
 
-        self.assertEqual(job_c.id, "KitC::default")
-        self.assertEqual(deps_c, [])
+class TestFalseNegativePrevention(unittest.TestCase):
 
-        self.assertEqual(job_b.id, "KitB::default")
-        self.assertEqual(deps_b, ["KitC::default"])
+    def test_fn2_log_error_detected(self):
+        """FN#2: Kit exits 0 but log contains ERROR -> FAIL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "logerr")
+            kits = {"logerr": LogErrorKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            result = engine.run()
+            self.assertFalse(result)
 
-        self.assertEqual(job_a.id, "KitA::default")
-        self.assertEqual(deps_a, ["KitB::default"])
+            targets = engine.get_targets()
+            t = targets["logerr"]
+            self.assertEqual(t.status, TargetStatus.FAIL)
+            self.assertIn("Log error", t.error_message)
 
-        # Verify state updates (mock executor simulates success)
-        # Should be called with PASS
-        self.state_manager.set_status.assert_any_call("KitC::default", TargetStatus.PASS)
-        self.state_manager.set_status.assert_any_call("KitB::default", TargetStatus.PASS)
-        self.state_manager.set_status.assert_any_call("KitA::default", TargetStatus.PASS)
+    def test_fn3_cascade_invalidation(self):
+        """FN#3: When upstream re-runs, downstream should also re-run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_multi_pipeline(tmpdir, {
+                "A": {"run": "simple"},
+                "B": {"run": "simple", "deps": ["A"]},
+            })
+            kits = {"simple": SimpleKit()}
 
-    def test_incremental_skip_passed(self):
-        """
-        C is PASS. B is PENDING. A is PENDING.
-        Should run B -> A. C should NOT be run, but B should depend on C's "completion" (conceptually).
-        However, if C is not running, we can't wait on a job ID.
-        So B effectively has NO running dependency on C.
-        """
-        self.state_manager.initialize.return_value = True # Incremental
+            # First run: both pass
+            engine = LocalEngine(pipeline, kits)
+            self.assertTrue(engine.run())
 
-        def get_status_side_effect(tid):
-            if tid == "KitC::default": return TargetStatus.PASS
-            return TargetStatus.PENDING
+            # Change inputs for A
+            pipeline.steps["A"].inputs["library_name"] = "changed_lib"
 
-        self.state_manager.get_status.side_effect = get_status_side_effect
+            # Second run: A re-runs, B should cascade
+            engine2 = LocalEngine(pipeline, kits)
+            self.assertTrue(engine2.run())
 
-        self.engine.run(self.request)
+            targets = engine2.get_targets()
+            self.assertEqual(targets["A"].status, TargetStatus.PASS)
+            self.assertEqual(targets["B"].status, TargetStatus.PASS)
 
-        submitted = self.executor.submitted_jobs
-        self.assertEqual(len(submitted), 2)
+    def test_auto_retry(self):
+        """Engine should auto-retry failed targets up to max_retries."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "fail")
+            kits = {"fail": FailKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=2)
+            result = engine.run()
+            self.assertFalse(result)
 
-        job_b, deps_b = submitted[0]
-        job_a, deps_a = submitted[1]
 
-        self.assertEqual(job_b.id, "KitB::default")
-        # Since C is PASS, it's filtered out of the execution graph.
-        # B depends on C, but C isn't running. So B has no dependencies *in this run*.
-        self.assertEqual(deps_b, [])
+class TestPvtOutputChecking(unittest.TestCase):
+    """Tests for the two-layer status model."""
 
-        self.assertEqual(job_a.id, "KitA::default")
-        self.assertEqual(deps_a, ["KitB::default"])
+    def test_pvt_outputs_all_present(self):
+        """All per-PVT outputs present -> PASS with pvt_details."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(
+                tmpdir, "pvt_kit",
+                inputs={"library_name": "test", "pvts": ["ss", "ff"]},
+            )
+            kits = {"pvt_kit": PvtKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            self.assertTrue(engine.run())
 
-    def test_incremental_partial_chain(self):
-        """
-        C is PENDING. B is PASS. A is PENDING.
-        """
-        self.state_manager.initialize.return_value = True
+            targets = engine.get_targets()
+            t = targets["pvt_kit"]
+            self.assertEqual(t.status, TargetStatus.PASS)
+            self.assertEqual(len(t.pvt_details), 2)
+            self.assertTrue(all(p.ok for p in t.pvt_details))
+            self.assertEqual(t.pvt_summary, "2/2 PVTs OK")
 
-        def get_status_side_effect(tid):
-            if tid == "KitC::default": return TargetStatus.PENDING
-            if tid == "KitB::default": return TargetStatus.PASS
-            if tid == "KitA::default": return TargetStatus.PENDING
-            return TargetStatus.PENDING
+    def test_pvt_outputs_missing(self):
+        """Some per-PVT outputs missing -> FAIL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(
+                tmpdir, "pvt_missing",
+                inputs={"library_name": "test", "pvts": ["ss", "ff"]},
+            )
+            kits = {"pvt_missing": PvtMissingKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            self.assertFalse(engine.run())
 
-        self.state_manager.get_status.side_effect = get_status_side_effect
+            targets = engine.get_targets()
+            t = targets["pvt_missing"]
+            self.assertEqual(t.status, TargetStatus.FAIL)
+            self.assertEqual(len(t.pvt_details), 2)
+            # First PVT created, second missing
+            self.assertTrue(t.pvt_details[0].ok)
+            self.assertFalse(t.pvt_details[1].ok)
+            self.assertIn("PVT output check", t.error_message)
 
-        self.engine.run(self.request)
+    def test_dependency_chain_with_pvts(self):
+        """Multi-step pipeline with PVT kits."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_multi_pipeline(tmpdir, {
+                "pvt_kit": {
+                    "run": "pvt_kit",
+                    "inputs": {"library_name": "test", "pvts": ["ss", "ff"]},
+                },
+                "simple": {
+                    "run": "simple",
+                    "deps": ["pvt_kit"],
+                },
+            })
+            kits = {"pvt_kit": PvtKit(), "simple": SimpleKit()}
+            engine = LocalEngine(pipeline, kits)
+            self.assertTrue(engine.run())
 
-        submitted = self.executor.submitted_jobs
-        # Expect C and A to run.
-        job_ids = [j[0].id for j in submitted]
-        self.assertIn("KitC::default", job_ids)
-        self.assertIn("KitA::default", job_ids)
-        self.assertNotIn("KitB::default", job_ids)
 
-        # Check deps
-        # C depends on nothing (in this run)
-        # A depends on B. B is PASS (not running). So A depends on nothing (in this run).
+class TestInputValidation(unittest.TestCase):
 
-        for job, deps in submitted:
-            if job.id == "KitC::default":
-                self.assertEqual(deps, [])
-            if job.id == "KitA::default":
-                self.assertEqual(deps, [])
+    def test_missing_input_detected(self):
+        """Missing required input should fail validation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "pvt_kit", inputs={})
+            kits = {"pvt_kit": PvtKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            result = engine.run()
+            self.assertFalse(result)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

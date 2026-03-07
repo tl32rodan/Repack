@@ -1,0 +1,49 @@
+# input.yaml — CWL-aligned kitdag pipeline configuration
+#
+# Demonstrates:
+#   - Steps with explicit inputs (no computation by kitdag)
+#   - Template variables in out fields: {output_root} expands to the top-level value
+#   - PVTs as array input (kit runs once with full array)
+#   - Dependencies between steps
+
+output_root: /tmp/kitdag_demo_output
+executor: local
+max_workers: 4
+
+steps:
+  liberty:
+    run: liberty
+    in:
+      ref_dir: /data/source_libs/demo_lib_7nm/liberty
+      old_name: demo_lib
+      library_name: demo_lib_7nm_trimmed
+      pvts: [ss_0p75v_125c, tt_0p85v_25c, ff_0p99v_m40c]
+      cells: [INV_X1, NAND2_X1, BUF_X2]
+    out:
+      output_dir: "{output_root}/liberty"
+      log: "{output_root}/liberty/liberty.log"
+    dependencies: []
+
+  timing_db:
+    run: timing_db
+    in:
+      lib_dir: "{output_root}/liberty"
+      library_name: demo_lib_7nm_trimmed
+      pvts: [ss_0p75v_125c, tt_0p85v_25c, ff_0p99v_m40c]
+      compile_flags: "-no_pg"
+    out:
+      output_dir: "{output_root}/timing_db"
+      log: "{output_root}/timing_db/timing_db.log"
+    dependencies: [liberty]
+
+  lef:
+    run: lef
+    in:
+      ref_dir: /data/source_libs/demo_lib_7nm/lef
+      old_name: demo_lib
+      library_name: demo_lib_7nm_trimmed
+      cells: [INV_X1, NAND2_X1, BUF_X2]
+    out:
+      output_dir: "{output_root}/lef"
+      log: "{output_root}/lef/lef.log"
+    dependencies: []
