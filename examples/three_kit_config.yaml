@@ -2,41 +2,20 @@
 # Example configuration for the three-kit demo flow.
 #
 # Demonstrates:
-#   - Library identity: old_name/old_ver -> new_name/new_ver
-#   - source_lib: pre-organized source folder (by kit type)
-#   - 3 PVT corners (corner-based kits generate one target per corner)
-#   - kit_options (per-kit overrides)
+#   - library_name: identifier for output naming
+#   - 3 PVT corners (kits with per-PVT targets read from extra.pvts)
+#   - kit_options in extra (per-kit overrides)
+#   - Domain-specific data in extra (pvts, cells, source_lib, etc.)
 
-# ── Library Identity ──
-old_name: demo_lib
-old_ver: "7nm"
-new_name: demo_lib
-new_ver: "7nm_trimmed"
-library_name: demo_lib_7nm_trimmed   # auto-derived as {new_name}_{new_ver}
+library_name: demo_lib_7nm_trimmed
 
 # ── Paths ──
-source_lib: /data/source_libs/demo_lib_7nm    # not used by mock commands
-output_root: /tmp/repack_demo_output
-upload_dest: /release/demo_lib_7nm_trimmed    # each kit has its own upload structure
+output_root: /tmp/kitdag_demo_output
+upload_dest: /release/demo_lib_7nm_trimmed
 
-# ── What to Repack ──
-pvts:
-  - ss_0p75v_125c
-  - tt_0p85v_25c
-  - ff_0p99v_m40c
-
-cells:
-  - INV_X1
-  - NAND2_X1
-  - BUF_X2
-
-# ── Per-kit Control ──
+# ── Execution ──
 executor_type: local
 max_workers: 4
-
-kit_options:
-  timing_db:
-    compile_flags: "-no_pg"
 
 # ── Spec Hashing (incremental detection) ──
 specs:
@@ -49,3 +28,18 @@ specs:
       db_format: "2017.06"
     lef:
       layer_version: "8.5"
+
+# ── Domain-specific data ──
+extra:
+  pvts:
+    - ss_0p75v_125c
+    - tt_0p85v_25c
+    - ff_0p99v_m40c
+  cells:
+    - INV_X1
+    - NAND2_X1
+    - BUF_X2
+  source_lib: /data/source_libs/demo_lib_7nm
+  kit_options:
+    timing_db:
+      compile_flags: "-no_pg"

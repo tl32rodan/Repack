@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from repack.core.validation import LogScanner, OutputValidator
+from kitdag.core.validation import LogScanner, OutputValidator
 
 
 class TestLogScanner(unittest.TestCase):

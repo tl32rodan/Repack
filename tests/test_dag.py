@@ -2,8 +2,8 @@
 
 import unittest
 
-from repack.core.dag import CyclicDependencyError, DAGBuilder
-from repack.core.target import KitTarget
+from kitdag.core.dag import CyclicDependencyError, DAGBuilder
+from kitdag.core.target import KitTarget
 
 
 class TestDAGBuilder(unittest.TestCase):

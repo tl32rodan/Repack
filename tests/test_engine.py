@@ -1,16 +1,16 @@
-"""Tests for RepackEngine, focusing on false-negative prevention."""
+"""Tests for Engine, focusing on false-negative prevention."""
 
 import os
 import tempfile
 import unittest
 from typing import Any, Dict, List
 
-from repack.config import RepackConfig
-from repack.core.kit import CornerBasedKit, Kit
-from repack.core.spec import SpecCollection
-from repack.core.target import KitTarget, TargetStatus
-from repack.engine.engine import RepackEngine
-from repack.executor.local import LocalExecutor
+from kitdag.config import Config
+from kitdag.core.kit import Kit
+from kitdag.core.spec import SpecCollection
+from kitdag.core.target import KitTarget, TargetStatus
+from kitdag.engine.engine import Engine
+from kitdag.executor.local import LocalExecutor
 
 
 class SimpleKit(Kit):
@@ -61,8 +61,12 @@ class MissingOutputKit(Kit):
         return ["expected_but_missing.lib"]
 
 
-class CornerKit(CornerBasedKit):
-    """Test corner-based kit."""
+class CornerKit(Kit):
+    """Test kit that produces per-PVT targets."""
+
+    def get_targets(self, config: Any) -> List[KitTarget]:
+        pvts = config.extra.get("pvts", [])
+        return [KitTarget(kit_name=self.name, pvt=pvt) for pvt in pvts]
 
     def construct_command(self, target: KitTarget, config: Any) -> List[str]:
         out_dir = os.path.join(self.get_output_path(config), target.pvt)
@@ -73,14 +77,19 @@ class CornerKit(CornerBasedKit):
         return [os.path.join(target.pvt, "output.lib")]
 
 
-def _make_config(tmpdir: str, pvts: List[str] = None) -> RepackConfig:
+def _make_config(tmpdir: str, pvts: List[str] = None) -> Config:
     specs = SpecCollection()
-    return RepackConfig(
+    extra = {}
+    if pvts is not None:
+        extra["pvts"] = pvts
+    else:
+        extra["pvts"] = ["ss_100c", "ff_0c"]
+    return Config(
         library_name="test_lib",
         output_root=tmpdir,
-        pvts=pvts or ["ss_100c", "ff_0c"],
         max_workers=2,
         specs=specs,
+        extra=extra,
     )
 
 
@@ -90,14 +99,14 @@ class TestEngineBasic(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
             kits = [SimpleKit("simple")]
-            engine = RepackEngine(config, kits, LocalExecutor(2))
+            engine = Engine(config, kits, LocalExecutor(2))
             self.assertTrue(engine.run())
 
     def test_fail_kit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
             kits = [FailKit("fail")]
-            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
             self.assertFalse(engine.run())
 
 
@@ -109,7 +118,7 @@ class TestFalseNegativePrevention(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
             kits = [MissingOutputKit("missing")]
-            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
             result = engine.run()
             self.assertFalse(result)
 
@@ -123,7 +132,7 @@ class TestFalseNegativePrevention(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
             kits = [LogErrorKit("logerr")]
-            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
             result = engine.run()
             self.assertFalse(result)
 
@@ -141,14 +150,14 @@ class TestFalseNegativePrevention(unittest.TestCase):
             kitB = SimpleKit("B", dependencies=["A"])
 
             # First run: both pass
-            engine = RepackEngine(config, [kitA, kitB], LocalExecutor(2))
+            engine = Engine(config, [kitA, kitB], LocalExecutor(2))
             self.assertTrue(engine.run())
 
             # Now change spec for A
             config.specs.set_kit_spec("A", {"changed": True})
 
             # Second run: A should re-run, and B should cascade
-            engine2 = RepackEngine(config, [kitA, kitB], LocalExecutor(2))
+            engine2 = Engine(config, [kitA, kitB], LocalExecutor(2))
             engine2._collect_targets()
             engine2._all_targets = engine2.state.reconcile(engine2._all_targets)
 
@@ -169,10 +178,9 @@ class TestFalseNegativePrevention(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
             kits = [FailKit("fail")]
-            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=2)
+            engine = Engine(config, kits, LocalExecutor(2), max_retries=2)
             result = engine.run()
             self.assertFalse(result)
-            # Should have attempted 3 times total (initial + 2 retries)
 
 
 class TestCornerBasedKits(unittest.TestCase):
@@ -190,7 +198,7 @@ class TestCornerBasedKits(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir, pvts=["ss_100c", "ff_0c"])
             kits = [CornerKit("liberty")]
-            engine = RepackEngine(config, kits, LocalExecutor(2))
+            engine = Engine(config, kits, LocalExecutor(2))
             self.assertTrue(engine.run())
 
 

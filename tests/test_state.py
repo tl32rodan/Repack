@@ -4,9 +4,9 @@ import os
 import tempfile
 import unittest
 
-from repack.core.spec import SpecCollection
-from repack.core.target import KitTarget, TargetStatus
-from repack.state.manager import StateManager
+from kitdag.core.spec import SpecCollection
+from kitdag.core.target import KitTarget, TargetStatus
+from kitdag.state.manager import StateManager
 
 
 class TestStateManager(unittest.TestCase):
