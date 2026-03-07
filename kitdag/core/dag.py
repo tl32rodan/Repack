@@ -1,7 +1,7 @@
 """DAG builder and topological sort for kit targets."""
 
 from collections import defaultdict, deque
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from kitdag.core.target import KitTarget
 
@@ -11,12 +11,10 @@ class CyclicDependencyError(Exception):
 
 
 class DAGBuilder:
-    """Builds a target-level DAG from kit-level dependencies.
+    """Builds a kit-level DAG from step dependencies.
 
-    Kit-level dependencies are expanded to target-level using PVT matching:
-    - If both kits are corner-based, targets with the same PVT are linked
-    - If upstream is non-corner-based (ALL), downstream PVT targets depend on it
-    - If downstream is non-corner-based (ALL), it depends on all upstream PVT targets
+    Each node is one KitTarget (one per kit/step). Edges represent
+    kit-level dependencies declared in the pipeline steps section.
     """
 
     def __init__(self) -> None:
@@ -34,34 +32,19 @@ class DAGBuilder:
                 self._deps[t.id] = set()
 
     def build_edges(self, kit_dependencies: Dict[str, List[str]]) -> None:
-        """Build target-level edges from kit-level dependencies.
+        """Build edges from kit-level dependencies.
 
         Args:
             kit_dependencies: {kit_name: [dependency_kit_names]}
         """
-        # Group targets by kit name
-        by_kit: Dict[str, List[KitTarget]] = defaultdict(list)
-        for t in self._all_targets.values():
-            by_kit[t.kit_name].append(t)
-
         for kit_name, dep_kit_names in kit_dependencies.items():
-            if kit_name not in by_kit:
+            if kit_name not in self._all_targets:
                 continue
             for dep_kit_name in dep_kit_names:
-                if dep_kit_name not in by_kit:
+                if dep_kit_name not in self._all_targets:
                     continue
-                for target in by_kit[kit_name]:
-                    for dep_target in by_kit[dep_kit_name]:
-                        if self._pvt_matches(target, dep_target):
-                            self._deps[target.id].add(dep_target.id)
-                            self._rdeps[dep_target.id].add(target.id)
-
-    @staticmethod
-    def _pvt_matches(downstream: KitTarget, upstream: KitTarget) -> bool:
-        """Check if PVT corners match for dependency linking."""
-        if upstream.pvt == "ALL" or downstream.pvt == "ALL":
-            return True
-        return upstream.pvt == downstream.pvt
+                self._deps[kit_name].add(dep_kit_name)
+                self._rdeps[dep_kit_name].add(kit_name)
 
     def topological_sort(self) -> List[str]:
         """Return target IDs in dependency-respecting execution order.

@@ -69,14 +69,9 @@ class _NodeItem(QGraphicsEllipseItem):
 
     @staticmethod
     def _short_label(target_id: str) -> str:
-        parts = target_id.split("::")
-        kit = parts[0]
-        pvt = parts[1] if len(parts) > 1 else ""
-        if len(kit) > 12:
-            kit = kit[:10] + ".."
-        if pvt and pvt != "ALL":
-            return f"{kit}\n{pvt}"
-        return kit
+        if len(target_id) > 12:
+            return target_id[:10] + ".."
+        return target_id
 
 
 class DAGViewWidget(QWidget):

@@ -1,8 +1,11 @@
-"""Summary table widgets for corner-based and non-corner-based kits.
+"""Summary table widgets for the two-layer status model.
+
+Layer 1: Kit-level status (PASS/FAIL/PENDING)
+Layer 2: Per-PVT output detail (from pvt_details) shown in PVT columns
 
 Displays O/X/- status in a grid:
-  - Corner-based tab: rows = kit names, columns = PVT corners
-  - Non-corner-based tab: rows = kit names, single status column
+  - PVT kits tab: rows = kit names, columns = PVT corners (from pvt_details)
+  - Other kits tab: rows = kit names, single status column
 
 Supports:
   - Click to toggle status (PASS -> FAIL for re-run)
@@ -10,7 +13,7 @@ Supports:
   - Right-click context menu for batch operations
 """
 
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QBrush, QColor, QFont
@@ -24,7 +27,7 @@ from PySide2.QtWidgets import (
     QWidget,
 )
 
-from kitdag.core.target import KitTarget, TargetStatus
+from kitdag.core.target import KitTarget, PvtStatus, TargetStatus
 
 
 # Status display mapping
@@ -44,46 +47,50 @@ STATUS_COLORS = {
     TargetStatus.RUNNING: QColor(33, 150, 243),    # blue
 }
 
+PVT_OK_COLOR = QColor(76, 175, 80)       # green
+PVT_MISSING_COLOR = QColor(244, 67, 54)  # red
+PVT_UNKNOWN_COLOR = QColor(158, 158, 158)  # gray
+
 
 class SummaryTableWidget(QTabWidget):
-    """Tabbed summary tables: corner-based and non-corner-based kits."""
+    """Tabbed summary tables: PVT kits and other kits."""
 
     target_selected = Signal(str)          # emits target_id
     status_changed = Signal(str, str)      # emits (target_id, new_status)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._corner_table = _CornerTable()
-        self._non_corner_table = _NonCornerTable()
+        self._pvt_table = _PvtKitTable()
+        self._other_table = _OtherKitTable()
 
-        self.addTab(self._corner_table, "Corner-Based Kits")
-        self.addTab(self._non_corner_table, "Non-Corner-Based Kits")
+        self.addTab(self._pvt_table, "PVT Kits")
+        self.addTab(self._other_table, "Other Kits")
 
-        self._corner_table.target_selected.connect(self.target_selected)
-        self._corner_table.status_changed.connect(self.status_changed)
-        self._non_corner_table.target_selected.connect(self.target_selected)
-        self._non_corner_table.status_changed.connect(self.status_changed)
+        self._pvt_table.target_selected.connect(self.target_selected)
+        self._pvt_table.status_changed.connect(self.status_changed)
+        self._other_table.target_selected.connect(self.target_selected)
+        self._other_table.status_changed.connect(self.status_changed)
 
     def update_data(
         self,
-        corner_kits: Dict[str, Dict[str, KitTarget]],
-        non_corner_kits: Dict[str, KitTarget],
+        pvt_kits: Dict[str, KitTarget],
+        other_kits: Dict[str, KitTarget],
         pvts: List[str],
     ) -> None:
         """Update both tables with fresh data.
 
         Args:
-            corner_kits: {kit_name: {pvt: KitTarget}}
-            non_corner_kits: {kit_name: KitTarget}
+            pvt_kits: {kit_name: KitTarget} — kits with pvt_details
+            other_kits: {kit_name: KitTarget} — kits without PVT expansion
             pvts: ordered list of PVT corner names
         """
-        self._corner_table.update_data(corner_kits, pvts)
-        self._non_corner_table.update_data(non_corner_kits)
+        self._pvt_table.update_data(pvt_kits, pvts)
+        self._other_table.update_data(other_kits)
 
     def apply_filter(self, text: str) -> None:
         """Filter rows by kit name substring."""
-        self._corner_table.apply_filter(text)
-        self._non_corner_table.apply_filter(text)
+        self._pvt_table.apply_filter(text)
+        self._other_table.apply_filter(text)
 
 
 class _BaseKitTable(QTableWidget):
@@ -105,9 +112,6 @@ class _BaseKitTable(QTableWidget):
         font = QFont("Monospace", 10)
         self.setFont(font)
 
-        # target_id stored per cell
-        self._cell_targets: Dict[tuple, str] = {}
-
     def _make_status_item(self, target: KitTarget) -> QTableWidgetItem:
         text = STATUS_DISPLAY.get(target.status, "?")
         item = QTableWidgetItem(text)
@@ -117,6 +121,21 @@ class _BaseKitTable(QTableWidget):
         item.setBackground(QBrush(color))
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         item.setData(Qt.UserRole, target.id)
+        return item
+
+    def _make_pvt_item(self, pvt_status: PvtStatus,
+                       target_id: str) -> QTableWidgetItem:
+        """Create a table cell for a per-PVT output check."""
+        text = "O" if pvt_status.ok else "X"
+        item = QTableWidgetItem(text)
+        item.setTextAlignment(Qt.AlignCenter)
+        color = PVT_OK_COLOR if pvt_status.ok else PVT_MISSING_COLOR
+        item.setForeground(QBrush(QColor(255, 255, 255)))
+        item.setBackground(QBrush(color))
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        item.setData(Qt.UserRole, target_id)
+        if not pvt_status.ok and pvt_status.missing_files:
+            item.setToolTip("Missing: " + ", ".join(pvt_status.missing_files))
         return item
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
@@ -174,37 +193,53 @@ class _BaseKitTable(QTableWidget):
                 self.setRowHidden(row, not visible)
 
 
-class _CornerTable(_BaseKitTable):
-    """2D table: rows = kit names, columns = PVT corners."""
+class _PvtKitTable(_BaseKitTable):
+    """Two-layer table: rows = kit names, columns = Status + PVT corners.
+
+    Column 0 = kit-level status (layer 1)
+    Columns 1..N = per-PVT output status (layer 2, from pvt_details)
+    """
 
     def update_data(
-        self, kits: Dict[str, Dict[str, KitTarget]], pvts: List[str]
+        self, kits: Dict[str, KitTarget], pvts: List[str]
     ) -> None:
         self.clear()
         kit_names = sorted(kits.keys())
 
         self.setRowCount(len(kit_names))
-        self.setColumnCount(len(pvts))
-        self.setHorizontalHeaderLabels(pvts)
+        self.setColumnCount(1 + len(pvts))
+        self.setHorizontalHeaderLabels(["Status"] + pvts)
         self.setVerticalHeaderLabels(kit_names)
 
         for r, kit_name in enumerate(kit_names):
-            targets = kits[kit_name]
-            for c, pvt in enumerate(pvts):
-                target = targets.get(pvt)
-                if target:
-                    item = self._make_status_item(target)
+            target = kits[kit_name]
+
+            # Column 0: kit-level status
+            item = self._make_status_item(target)
+            self.setItem(r, 0, item)
+
+            # Build PVT lookup from pvt_details
+            pvt_lookup = {p.pvt: p for p in target.pvt_details}
+
+            # Columns 1..N: per-PVT output status
+            for c, pvt in enumerate(pvts, start=1):
+                pvt_status = pvt_lookup.get(pvt)
+                if pvt_status:
+                    pitem = self._make_pvt_item(pvt_status, target.id)
                 else:
-                    # No target for this PVT = SKIP
-                    skip_target = KitTarget(kit_name=kit_name, pvt=pvt,
-                                            status=TargetStatus.SKIP)
-                    item = self._make_status_item(skip_target)
-                self.setItem(r, c, item)
+                    # No PVT detail available (kit hasn't run yet)
+                    pitem = QTableWidgetItem("-")
+                    pitem.setTextAlignment(Qt.AlignCenter)
+                    pitem.setBackground(QBrush(PVT_UNKNOWN_COLOR))
+                    pitem.setForeground(QBrush(QColor(255, 255, 255)))
+                    pitem.setFlags(pitem.flags() & ~Qt.ItemIsEditable)
+                    pitem.setData(Qt.UserRole, target.id)
+                self.setItem(r, c, pitem)
 
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
 
-class _NonCornerTable(_BaseKitTable):
+class _OtherKitTable(_BaseKitTable):
     """Single-column table: rows = kit names, column = status."""
 
     def update_data(self, kits: Dict[str, KitTarget]) -> None:

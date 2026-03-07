@@ -115,19 +115,22 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self._status_label)
 
     def _refresh_data(self) -> None:
-        """Refresh all widgets with current target data."""
-        corner_kits: Dict[str, Dict[str, KitTarget]] = {}
-        non_corner_kits: Dict[str, KitTarget] = {}
+        """Refresh all widgets with current target data.
+
+        Two-layer model:
+        - PVT kits: have pvt_details, shown in corner table with PVT columns
+        - Other kits: no pvt_details, shown in non-corner table
+        """
+        pvt_kits: Dict[str, KitTarget] = {}
+        other_kits: Dict[str, KitTarget] = {}
 
         for tid, target in self._targets.items():
             if target.kit_name in self._corner_kit_names:
-                if target.kit_name not in corner_kits:
-                    corner_kits[target.kit_name] = {}
-                corner_kits[target.kit_name][target.pvt] = target
+                pvt_kits[target.kit_name] = target
             else:
-                non_corner_kits[target.kit_name] = target
+                other_kits[target.kit_name] = target
 
-        self._summary_table.update_data(corner_kits, non_corner_kits, self._pvts)
+        self._summary_table.update_data(pvt_kits, other_kits, self._pvts)
         self._dag_view.update_dag(self._dag, self._targets)
         self._update_status_bar()
 
@@ -199,10 +202,10 @@ class KitDAGApp:
         """Launch the GUI application.
 
         Args:
-            targets: All targets with current status.
+            targets: All targets with current status (kit-level).
             dag: Built DAG for visualization.
             pvts: List of PVT corner names.
-            corner_kit_names: Names of corner-based kits.
+            corner_kit_names: Names of kits with pvt_key (PVT expansion).
 
         Returns:
             Application exit code.

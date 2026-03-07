@@ -1,33 +1,64 @@
-"""KitTarget - atomic unit of work in the kitdag pipeline."""
+"""KitTarget — execution unit in the kitdag pipeline.
+
+Each KitTarget represents one kit execution (runs once, not per-PVT).
+Per-PVT output detail is tracked in PvtStatus for the dashboard.
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List
 
 
 class TargetStatus(Enum):
-    """Status of a kitdag target."""
+    """Status of a kit execution."""
+
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     PASS = "PASS"
     FAIL = "FAIL"
-    SKIP = "SKIP"  # kit/pvt not needed per current spec ("-" in summary)
+    SKIP = "SKIP"
+
+
+@dataclass
+class PvtStatus:
+    """Per-PVT output check result (dashboard layer 2)."""
+
+    pvt: str
+    ok: bool = False
+    missing_files: List[str] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        status = "OK" if self.ok else f"MISSING({self.missing_files})"
+        return f"PvtStatus({self.pvt}, {status})"
 
 
 @dataclass
 class KitTarget:
-    """Atomic unit of work: one kit at one PVT (or ALL for non-corner-based)."""
+    """One kit execution (runs once with full inputs).
+
+    Layer 1: kit-level status (PASS/FAIL/PENDING/RUNNING)
+    Layer 2: per-PVT output detail in pvt_details (for dashboard expansion)
+    """
 
     kit_name: str
-    pvt: str = "ALL"
     status: TargetStatus = TargetStatus.PENDING
-    log_path: Optional[str] = None
-    spec_hash: str = ""
+    log_path: str = ""
+    output_dir: str = ""
+    input_hash: str = ""
     error_message: str = ""
+    pvt_details: List[PvtStatus] = field(default_factory=list)
 
     @property
     def id(self) -> str:
-        return f"{self.kit_name}::{self.pvt}"
+        return self.kit_name
+
+    @property
+    def pvt_summary(self) -> str:
+        """e.g. '3/3 PVTs OK' or '2/3 PVTs OK'."""
+        if not self.pvt_details:
+            return ""
+        ok = sum(1 for p in self.pvt_details if p.ok)
+        return f"{ok}/{len(self.pvt_details)} PVTs OK"
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -38,4 +69,5 @@ class KitTarget:
         return self.id == other.id
 
     def __repr__(self) -> str:
-        return f"KitTarget({self.id}, {self.status.value})"
+        detail = f", {self.pvt_summary}" if self.pvt_details else ""
+        return f"KitTarget({self.id}, {self.status.value}{detail})"

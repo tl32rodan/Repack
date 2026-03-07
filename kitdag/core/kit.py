@@ -1,102 +1,134 @@
-"""Kit base class for the kitdag pipeline.
+"""Kit base class — CWL CommandLineTool-like template.
 
-Each kit is a self-contained unit of work in the DAG. Kits declare their
-dependencies, define the command to run, and specify expected outputs.
+Each kit is a declarative template that defines:
+- inputs: what parameters it needs (KitInput)
+- outputs: what it produces (KitOutput) — standardized as output_dir + log
+- base_command + get_arguments(): how to build the shell command
+- pvt_key: which input is the PVT array (for dashboard per-PVT expansion)
+- get_expected_pvt_outputs(): per-PVT output files for validation
 
-The kit decides its own targets by overriding get_targets(). By default,
-a single target with pvt="ALL" is created.
-
-False-negative prevention:
-  - get_expected_outputs(): kits MUST declare expected output files
-  - get_log_error_patterns(): optional extra error patterns for log scanning
-  - clean_output(): called BEFORE every re-run to prevent stale artifacts
+Kit runs ONCE with full inputs (including pvts as an array).
 """
 
-import logging
-import os
-import shutil
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
 
-from kitdag.core.target import KitTarget
+import yaml
 
-logger = logging.getLogger(__name__)
+
+@dataclass
+class KitInput:
+    """Declares a kit input parameter (mirrors CWL input)."""
+
+    id: str
+    type: str = "string"  # string, int, File, Directory, string[]
+    doc: str = ""
+
+
+@dataclass
+class KitOutput:
+    """Declares a kit output (mirrors CWL output)."""
+
+    id: str
+    type: str = "Directory"  # Directory, File
+    doc: str = ""
 
 
 class Kit(ABC):
     """Base class for all kits in a kitdag pipeline.
 
-    Each kit defines:
-    - What targets it produces (override get_targets())
-    - How to build each target (construct_command())
-    - What output files to expect (get_expected_outputs())
-
-    Subclasses MUST implement construct_command() and get_expected_outputs().
-    Override get_targets() to produce multiple targets (e.g., one per PVT).
+    Subclasses MUST implement ``get_arguments()``.
+    Override ``get_expected_pvt_outputs()`` for per-PVT output validation.
     """
 
-    def __init__(self, name: str, dependencies: Optional[List[str]] = None):
-        self.name = name
-        self.dependencies: List[str] = dependencies or []
+    name: str = ""
+    inputs: List[KitInput] = []
+    outputs: List[KitOutput] = []
+    base_command: Union[str, List[str]] = ""
+    pvt_key: Optional[str] = None  # which input holds the PVT array
 
     @abstractmethod
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        """Return the shell command to execute for this target."""
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        """Build command-line arguments from resolved inputs dict.
 
-    @abstractmethod
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        """Return list of expected output file paths (relative to output_path).
-
-        Every kit MUST declare what files it expects to produce.
-        The engine will verify all listed files exist and are non-empty
-        before marking the target as PASS.
+        Args:
+            inputs: Merged dict of step inputs + output_dir from step config.
 
         Returns:
-            List of relative file paths. Empty list = skip file check
-            (but log scanning still runs).
+            List of command-line argument strings.
         """
 
-    def get_targets(self, config: Any) -> List[KitTarget]:
-        """Return targets for this kit.
+    def get_command(self, inputs: Dict[str, Any]) -> List[str]:
+        """Full command = base_command + arguments."""
+        if isinstance(self.base_command, str):
+            cmd = [self.base_command] if self.base_command else []
+        else:
+            cmd = list(self.base_command)
+        cmd.extend(str(a) for a in self.get_arguments(inputs))
+        return cmd
 
-        Default: single target with pvt="ALL".
-        Override to produce per-PVT or other multi-target expansions.
+    def get_expected_pvt_outputs(self, pvt: str, inputs: Dict[str, Any]) -> List[str]:
+        """Expected output files for one PVT (relative to output_dir).
+
+        Used by the dashboard for per-PVT status checking (layer 2).
+        Return [] if this kit has no per-PVT outputs.
         """
-        return [KitTarget(kit_name=self.name, pvt="ALL")]
-
-    def get_output_path(self, config: Any) -> str:
-        """Return the output directory for this kit's products."""
-        return os.path.join(config.output_root, self.name)
+        return []
 
     def get_log_error_patterns(self) -> List[str]:
-        """Return extra regex patterns to scan for in log files.
-
-        Default patterns (ERROR, FATAL, FAILED, etc.) are always scanned.
-        Override this to add kit-specific patterns.
-        """
+        """Extra regex patterns to scan for in log files."""
         return []
 
     def get_log_ignore_patterns(self) -> List[str]:
-        """Return regex patterns to IGNORE during log scanning.
-
-        Some kits produce lines like "ERROR_COUNT: 0" that are not actual
-        errors. Override to whitelist such patterns.
-        """
+        """Regex patterns to ignore during log scanning."""
         return []
 
-    def clean_output(self, target: KitTarget, config: Any) -> None:
-        """Clean output directory before re-run.
+    def validate_inputs(self, inputs: Dict[str, Any]) -> List[str]:
+        """Validate that all required inputs are provided.
 
-        Default implementation removes the target's output directory.
-        Override for more surgical cleanup if needed.
+        Returns:
+            List of error messages (empty = valid).
         """
-        output_path = self.get_output_path(config)
-        if target.pvt != "ALL":
-            output_path = os.path.join(output_path, target.pvt)
+        errors = []
+        for inp in self.inputs:
+            if inp.id not in inputs:
+                errors.append(
+                    f"Missing required input '{inp.id}' for kit '{self.name}'"
+                )
+        return errors
 
-        if os.path.exists(output_path):
-            logger.info("Cleaning output for %s: %s", target.id, output_path)
-            shutil.rmtree(output_path)
+    def to_cwl(self) -> str:
+        """Export this kit as a CWL v1.0 CommandLineTool YAML document."""
+        cwl: Dict[str, Any] = {
+            "cwlVersion": "v1.0",
+            "class": "CommandLineTool",
+            "baseCommand": self.base_command,
+            "inputs": {},
+            "outputs": {},
+        }
+
+        type_map = {
+            "string": "string",
+            "int": "int",
+            "File": "File",
+            "Directory": "Directory",
+            "string[]": {"type": "array", "items": "string"},
+        }
+
+        for inp in self.inputs:
+            cwl["inputs"][inp.id] = {
+                "type": type_map.get(inp.type, "string"),
+            }
+            if inp.doc:
+                cwl["inputs"][inp.id]["doc"] = inp.doc
+
+        for out in self.outputs:
+            cwl["outputs"][out.id] = {
+                "type": type_map.get(out.type, "Directory"),
+            }
+
+        return yaml.dump(cwl, default_flow_style=False, sort_keys=False)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.name!r})"

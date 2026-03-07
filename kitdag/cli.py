@@ -5,8 +5,6 @@ import logging
 import sys
 from typing import List, Optional
 
-from kitdag.config import Config, load_config
-
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -17,48 +15,36 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     # --- run command ---
     run_parser = subparsers.add_parser("run", help="Execute kitdag pipeline")
+    run_parser.add_argument("input", help="Path to input.yaml")
+    run_parser.add_argument("--kits", help="Path to Python script defining kits")
     run_parser.add_argument(
-        "config", help="Path to YAML config file"
-    )
-    run_parser.add_argument(
-        "--script", help="Path to Python script defining kits"
-    )
-    run_parser.add_argument(
-        "--executor", choices=["local", "lsf"], default=None,
-        help="Override executor type"
+        "--executor", choices=["local", "cwl"], default=None,
+        help="Override executor type (default: from input.yaml)",
     )
     run_parser.add_argument(
         "--max-workers", type=int, default=None,
-        help="Max parallel workers (local executor)"
+        help="Max parallel workers (local engine)",
     )
     run_parser.add_argument(
         "--max-retries", type=int, default=3,
-        help="Max auto-retry attempts for failed targets (default: 3)"
+        help="Max auto-retry attempts (default: 3)",
     )
     run_parser.add_argument(
         "--gui", action="store_true",
-        help="Launch GUI after execution"
+        help="Launch dashboard after execution",
     )
 
     # --- gui command ---
-    gui_parser = subparsers.add_parser("gui", help="Launch summary GUI")
-    gui_parser.add_argument(
-        "config", help="Path to YAML config file"
-    )
-    gui_parser.add_argument(
-        "--script", help="Path to Python script defining kits"
-    )
+    gui_parser = subparsers.add_parser("gui", help="Launch dashboard")
+    gui_parser.add_argument("input", help="Path to input.yaml")
+    gui_parser.add_argument("--kits", help="Path to Python script defining kits")
 
     # --- status command ---
     status_parser = subparsers.add_parser("status", help="Show current status")
-    status_parser.add_argument(
-        "work_dir", help="KitDAG work directory (containing kitdag_status.csv)"
-    )
+    status_parser.add_argument("work_dir", help="Work directory (containing kitdag_status.csv)")
 
     # Global options
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Verbose logging"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
 
     return parser.parse_args(argv)
 
@@ -83,7 +69,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("No status file found.")
         return 1
 
-    # Print summary
     summary = {}
     for t in targets.values():
         key = t.status.value
@@ -93,14 +78,27 @@ def cmd_status(args: argparse.Namespace) -> int:
     for status, count in sorted(summary.items()):
         print(f"  {status}: {count}")
 
-    # Print failures
     failures = [t for t in targets.values() if t.status.value == "FAIL"]
     if failures:
         print(f"\nFailed targets ({len(failures)}):")
         for t in failures:
-            print(f"  {t.id}: {t.error_message}")
+            msg = t.error_message
+            if t.pvt_details:
+                msg = f"{t.pvt_summary} - {msg}"
+            print(f"  {t.id}: {msg}")
 
     return 0
+
+
+def _load_kits(args, pipeline):
+    """Load kit definitions from --kits script."""
+    from kitdag.core.kit_loader import load_kits_from_script
+
+    if not getattr(args, "kits", None):
+        return {}
+
+    kits = load_kits_from_script(args.kits, pipeline)
+    return {k.name: k for k in kits}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -114,120 +112,86 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "status":
         return cmd_status(args)
 
-    # For run/gui commands, config is required
-    config = load_config(args.config)
+    # For run/gui, load pipeline config
+    from kitdag.pipeline import load_pipeline
+
+    pipeline = load_pipeline(args.input)
 
     # Apply CLI overrides
-    if hasattr(args, "executor") and args.executor:
-        config.executor_type = args.executor
-    if hasattr(args, "max_workers") and args.max_workers:
-        config.max_workers = args.max_workers
+    if getattr(args, "executor", None):
+        pipeline.executor = args.executor
+    if getattr(args, "max_workers", None):
+        pipeline.max_workers = args.max_workers
+
+    # Load kit definitions
+    kits = _load_kits(args, pipeline)
+    if not kits:
+        print("Error: no kits defined. Use --kits to specify kit definitions.")
+        return 1
 
     if args.command == "run":
-        # Load kit definitions from script
-        kits = _load_kits(args.script, config) if args.script else []
-        if not kits:
-            print("Error: no kits defined. Use --script to specify kit definitions.")
-            return 1
+        # Select engine
+        if pipeline.executor == "cwl":
+            from kitdag.engine.cwl import CwlEngine
+            engine = CwlEngine(
+                pipeline=pipeline, kits=kits,
+                max_retries=args.max_retries,
+            )
+        else:
+            from kitdag.engine.local import LocalEngine
+            engine = LocalEngine(
+                pipeline=pipeline, kits=kits,
+                max_retries=args.max_retries,
+            )
 
-        # Create executor
-        executor = _create_executor(config)
-
-        # Run engine
-        from kitdag.engine import Engine
-        engine = Engine(
-            config=config,
-            kits=kits,
-            executor=executor,
-            max_retries=args.max_retries,
-        )
         success = engine.run()
 
-        # Optionally launch GUI
         if args.gui:
-            _launch_gui(engine.get_targets(), engine.get_dag(), kits, config)
+            _launch_gui(engine.get_targets(), engine.get_dag(), kits, pipeline)
 
         return 0 if success else 1
 
     if args.command == "gui":
-        kits = _load_kits(args.script, config) if args.script else []
-
         from kitdag.state.manager import StateManager
         from kitdag.core.dag import DAGBuilder
 
-        state = StateManager(work_dir=config.output_root)
+        state = StateManager(work_dir=pipeline.output_root)
         targets = state.load()
 
         dag = DAGBuilder()
         dag.add_targets(list(targets.values()))
-        if kits:
-            kit_deps = {k.name: k.dependencies for k in kits}
-            dag.build_edges(kit_deps)
+        kit_deps = {
+            name: step.dependencies
+            for name, step in pipeline.steps.items()
+        }
+        dag.build_edges(kit_deps)
 
-        return _launch_gui(targets, dag, kits, config)
+        return _launch_gui(targets, dag, kits, pipeline)
 
     return 0
 
 
-def _launch_gui(targets, dag, kits, config):
-    """Launch the KitDAG GUI."""
+def _launch_gui(targets, dag, kits, pipeline):
+    """Launch the KitDAG dashboard."""
     from kitdag.gui.app import KitDAGApp
 
-    # Collect pvts from kit targets
-    pvts = sorted({t.pvt for t in targets.values() if t.pvt != "ALL"})
-    # All kits with per-pvt targets are "corner kits"
+    pvts = set()
     corner_kit_names = []
-    for kit in kits:
-        kit_targets = kit.get_targets(config)
-        if any(t.pvt != "ALL" for t in kit_targets):
-            corner_kit_names.append(kit.name)
+    for name, kit in kits.items():
+        if kit.pvt_key:
+            corner_kit_names.append(name)
+            step = pipeline.steps.get(name)
+            if step:
+                step_pvts = step.inputs.get(kit.pvt_key, [])
+                if isinstance(step_pvts, list):
+                    pvts.update(step_pvts)
 
     return KitDAGApp.launch(
         targets=targets,
         dag=dag,
-        pvts=pvts,
+        pvts=sorted(pvts),
         corner_kit_names=corner_kit_names,
     )
-
-
-def _load_kits(script_path, config):
-    """Load kit definitions from a Python script.
-
-    The script should define a function `register_kits(config)` that
-    returns a list of Kit instances.
-    """
-    import importlib.util
-
-    if not script_path:
-        return []
-
-    spec = importlib.util.spec_from_file_location("kit_defs", script_path)
-    if spec is None or spec.loader is None:
-        print(f"Error: cannot load kit script: {script_path}")
-        return []
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if hasattr(module, "register_kits"):
-        return module.register_kits(config)
-    else:
-        print(f"Warning: {script_path} has no register_kits() function")
-        return []
-
-
-def _create_executor(config: Config):
-    """Create the appropriate executor based on config."""
-    if config.executor_type == "lsf":
-        logging.getLogger(__name__).warning(
-            "LSFExecutor requires site-specific subclass. "
-            "Falling back to LocalExecutor."
-        )
-        from kitdag.executor.local import LocalExecutor
-        return LocalExecutor(max_workers=config.max_workers)
-    else:
-        from kitdag.executor.local import LocalExecutor
-        return LocalExecutor(max_workers=config.max_workers)
 
 
 if __name__ == "__main__":

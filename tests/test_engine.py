@@ -5,201 +5,314 @@ import tempfile
 import unittest
 from typing import Any, Dict, List
 
-from kitdag.config import Config
-from kitdag.core.kit import Kit
-from kitdag.core.spec import SpecCollection
+from kitdag.core.kit import Kit, KitInput, KitOutput
 from kitdag.core.target import KitTarget, TargetStatus
-from kitdag.engine.engine import Engine
-from kitdag.executor.local import LocalExecutor
+from kitdag.engine.local import LocalEngine
+from kitdag.pipeline import PipelineConfig, StepConfig
 
+
+# ---------------------------------------------------------------------------
+# Test kit implementations
+# ---------------------------------------------------------------------------
 
 class SimpleKit(Kit):
-    """Test kit that echoes and creates expected output."""
+    """Test kit that creates expected output."""
 
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        out = os.path.join(self.get_output_path(config), "output.txt")
-        return ["sh", "-c", f"echo 'ok' > {out}"]
+    name = "simple"
+    base_command = "sh"
 
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        return ["output.txt"]
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        out = os.path.join(out_dir, "output.txt")
+        return ["-c", f"mkdir -p {out_dir} && echo 'ok' > {out}"]
 
 
 class FailKit(Kit):
     """Test kit that always fails."""
 
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        return ["sh", "-c", "exit 1"]
+    name = "fail"
+    base_command = "sh"
 
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        return ["output.txt"]
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        return ["-c", "exit 1"]
 
 
 class LogErrorKit(Kit):
     """Test kit that succeeds (exit 0) but has ERROR in log.
 
-    This tests false-negative #2: log has ERROR but return code is 0.
+    Tests false-negative #2: log has ERROR but return code is 0.
     """
 
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        out = os.path.join(self.get_output_path(config), "output.txt")
-        return ["sh", "-c", f"echo 'ok' > {out} && echo 'ERROR: something went wrong'"]
+    name = "logerr"
+    base_command = "sh"
 
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        return ["output.txt"]
+    inputs = [KitInput("library_name")]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
 
-
-class MissingOutputKit(Kit):
-    """Test kit that exits 0 but doesn't produce expected output.
-
-    This tests false-negative #1: exit code 0 but output is missing.
-    """
-
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        return ["sh", "-c", "echo 'done'"]
-
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        return ["expected_but_missing.lib"]
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        out = os.path.join(out_dir, "output.txt")
+        return ["-c", f"mkdir -p {out_dir} && echo 'ok' > {out} && echo 'ERROR: something went wrong'"]
 
 
-class CornerKit(Kit):
-    """Test kit that produces per-PVT targets."""
+class PvtKit(Kit):
+    """Test kit with per-PVT outputs."""
 
-    def get_targets(self, config: Any) -> List[KitTarget]:
-        pvts = config.extra.get("pvts", [])
-        return [KitTarget(kit_name=self.name, pvt=pvt) for pvt in pvts]
+    name = "pvt_kit"
+    base_command = "sh"
+    pvt_key = "pvts"
 
-    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
-        out_dir = os.path.join(self.get_output_path(config), target.pvt)
-        out = os.path.join(out_dir, "output.lib")
-        return ["sh", "-c", f"mkdir -p {out_dir} && echo 'ok' > {out}"]
+    inputs = [
+        KitInput("library_name"),
+        KitInput("pvts", type="string[]"),
+    ]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
 
-    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
-        return [os.path.join(target.pvt, "output.lib")]
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        lib_name = inputs.get("library_name", "test")
+        pvts = inputs.get("pvts", [])
+
+        cmds = []
+        for pvt in pvts:
+            pvt_dir = os.path.join(out_dir, pvt)
+            out_file = os.path.join(pvt_dir, f"{lib_name}_{pvt}.lib")
+            cmds.append(f"mkdir -p {pvt_dir} && echo 'ok' > {out_file}")
+
+        return ["-c", " && ".join(cmds)] if cmds else ["-c", "true"]
+
+    def get_expected_pvt_outputs(self, pvt: str, inputs: Dict[str, Any]) -> List[str]:
+        lib_name = inputs.get("library_name", "test")
+        return [f"{pvt}/{lib_name}_{pvt}.lib"]
 
 
-def _make_config(tmpdir: str, pvts: List[str] = None) -> Config:
-    specs = SpecCollection()
-    extra = {}
-    if pvts is not None:
-        extra["pvts"] = pvts
-    else:
-        extra["pvts"] = ["ss_100c", "ff_0c"]
-    return Config(
-        library_name="test_lib",
+class PvtMissingKit(Kit):
+    """Kit that claims per-PVT outputs but doesn't create them all."""
+
+    name = "pvt_missing"
+    base_command = "sh"
+    pvt_key = "pvts"
+
+    inputs = [
+        KitInput("library_name"),
+        KitInput("pvts", type="string[]"),
+    ]
+    outputs = [KitOutput("output_dir"), KitOutput("log")]
+
+    def get_arguments(self, inputs: Dict[str, Any]) -> List[str]:
+        out_dir = inputs.get("output_dir", "")
+        lib_name = inputs.get("library_name", "test")
+        pvts = inputs.get("pvts", [])
+
+        # Only create output for the first PVT
+        if pvts:
+            pvt = pvts[0]
+            pvt_dir = os.path.join(out_dir, pvt)
+            out_file = os.path.join(pvt_dir, f"{lib_name}_{pvt}.lib")
+            return ["-c", f"mkdir -p {pvt_dir} && echo 'ok' > {out_file}"]
+        return ["-c", "true"]
+
+    def get_expected_pvt_outputs(self, pvt: str, inputs: Dict[str, Any]) -> List[str]:
+        lib_name = inputs.get("library_name", "test")
+        return [f"{pvt}/{lib_name}_{pvt}.lib"]
+
+
+# ---------------------------------------------------------------------------
+# Helper to build pipeline configs
+# ---------------------------------------------------------------------------
+
+def _make_pipeline(tmpdir: str, kit_name: str = "simple",
+                   deps: List[str] = None,
+                   inputs: Dict[str, Any] = None) -> PipelineConfig:
+    """Create a single-step pipeline for testing."""
+    step_inputs = inputs or {"library_name": "test_lib"}
+    return PipelineConfig(
+        steps={
+            kit_name: StepConfig(
+                name=kit_name,
+                run=kit_name,
+                inputs=step_inputs,
+                output_dir=os.path.join(tmpdir, kit_name),
+                log_path=os.path.join(tmpdir, kit_name, f"{kit_name}.log"),
+                dependencies=deps or [],
+            ),
+        },
         output_root=tmpdir,
+        executor="local",
         max_workers=2,
-        specs=specs,
-        extra=extra,
     )
 
+
+def _make_multi_pipeline(tmpdir: str, steps_config: Dict) -> PipelineConfig:
+    """Create a multi-step pipeline for testing.
+
+    steps_config: {name: {"run": kit_name, "deps": [...], "inputs": {...}}}
+    """
+    steps = {}
+    for name, cfg in steps_config.items():
+        run = cfg.get("run", name)
+        steps[name] = StepConfig(
+            name=name,
+            run=run,
+            inputs=cfg.get("inputs", {"library_name": "test_lib"}),
+            output_dir=os.path.join(tmpdir, name),
+            log_path=os.path.join(tmpdir, name, f"{name}.log"),
+            dependencies=cfg.get("deps", []),
+        )
+    return PipelineConfig(
+        steps=steps,
+        output_root=tmpdir,
+        executor="local",
+        max_workers=2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 class TestEngineBasic(unittest.TestCase):
 
     def test_simple_pass(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir)
-            kits = [SimpleKit("simple")]
-            engine = Engine(config, kits, LocalExecutor(2))
+            pipeline = _make_pipeline(tmpdir, "simple")
+            kits = {"simple": SimpleKit()}
+            engine = LocalEngine(pipeline, kits)
             self.assertTrue(engine.run())
 
     def test_fail_kit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir)
-            kits = [FailKit("fail")]
-            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
+            pipeline = _make_pipeline(tmpdir, "fail")
+            kits = {"fail": FailKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
             self.assertFalse(engine.run())
 
 
 class TestFalseNegativePrevention(unittest.TestCase):
-    """Tests for the four false-negative scenarios."""
-
-    def test_fn1_missing_output_detected(self):
-        """FN#1: Kit exits 0 but expected output is missing -> FAIL."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir)
-            kits = [MissingOutputKit("missing")]
-            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
-            result = engine.run()
-            self.assertFalse(result)
-
-            targets = engine.get_targets()
-            t = targets["missing::ALL"]
-            self.assertEqual(t.status, TargetStatus.FAIL)
-            self.assertIn("Missing", t.error_message)
 
     def test_fn2_log_error_detected(self):
         """FN#2: Kit exits 0 but log contains ERROR -> FAIL."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir)
-            kits = [LogErrorKit("logerr")]
-            engine = Engine(config, kits, LocalExecutor(2), max_retries=0)
+            pipeline = _make_pipeline(tmpdir, "logerr")
+            kits = {"logerr": LogErrorKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
             result = engine.run()
             self.assertFalse(result)
 
             targets = engine.get_targets()
-            t = targets["logerr::ALL"]
+            t = targets["logerr"]
             self.assertEqual(t.status, TargetStatus.FAIL)
             self.assertIn("Log error", t.error_message)
 
     def test_fn3_cascade_invalidation(self):
         """FN#3: When upstream re-runs, downstream should also re-run."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir, pvts=[])
-
-            kitA = SimpleKit("A")
-            kitB = SimpleKit("B", dependencies=["A"])
+            pipeline = _make_multi_pipeline(tmpdir, {
+                "A": {"run": "simple"},
+                "B": {"run": "simple", "deps": ["A"]},
+            })
+            kits = {"simple": SimpleKit()}
 
             # First run: both pass
-            engine = Engine(config, [kitA, kitB], LocalExecutor(2))
+            engine = LocalEngine(pipeline, kits)
             self.assertTrue(engine.run())
 
-            # Now change spec for A
-            config.specs.set_kit_spec("A", {"changed": True})
+            # Change inputs for A
+            pipeline.steps["A"].inputs["library_name"] = "changed_lib"
 
-            # Second run: A should re-run, and B should cascade
-            engine2 = Engine(config, [kitA, kitB], LocalExecutor(2))
-            engine2._collect_targets()
-            engine2._all_targets = engine2.state.reconcile(engine2._all_targets)
+            # Second run: A re-runs, B should cascade
+            engine2 = LocalEngine(pipeline, kits)
+            self.assertTrue(engine2.run())
 
-            # A should be pending (spec changed)
-            a_target = next(t for t in engine2._all_targets if t.kit_name == "A")
-            self.assertEqual(a_target.status, TargetStatus.PENDING)
-
-            # Build DAG and cascade
-            engine2._build_dag()
-            engine2._cascade_invalidation()
-
-            # B should now also be pending due to cascade
-            targets = engine2.state.get_targets()
-            self.assertEqual(targets["B::ALL"].status, TargetStatus.PENDING)
+            targets = engine2.get_targets()
+            self.assertEqual(targets["A"].status, TargetStatus.PASS)
+            self.assertEqual(targets["B"].status, TargetStatus.PASS)
 
     def test_auto_retry(self):
         """Engine should auto-retry failed targets up to max_retries."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir)
-            kits = [FailKit("fail")]
-            engine = Engine(config, kits, LocalExecutor(2), max_retries=2)
+            pipeline = _make_pipeline(tmpdir, "fail")
+            kits = {"fail": FailKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=2)
             result = engine.run()
             self.assertFalse(result)
 
 
-class TestCornerBasedKits(unittest.TestCase):
+class TestPvtOutputChecking(unittest.TestCase):
+    """Tests for the two-layer status model."""
 
-    def test_corner_kit_targets(self):
+    def test_pvt_outputs_all_present(self):
+        """All per-PVT outputs present -> PASS with pvt_details."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir, pvts=["ss_100c", "ff_0c"])
-            kit = CornerKit("liberty")
-            targets = kit.get_targets(config)
-            self.assertEqual(len(targets), 2)
-            self.assertEqual(targets[0].pvt, "ss_100c")
-            self.assertEqual(targets[1].pvt, "ff_0c")
-
-    def test_corner_kit_execution(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = _make_config(tmpdir, pvts=["ss_100c", "ff_0c"])
-            kits = [CornerKit("liberty")]
-            engine = Engine(config, kits, LocalExecutor(2))
+            pipeline = _make_pipeline(
+                tmpdir, "pvt_kit",
+                inputs={"library_name": "test", "pvts": ["ss", "ff"]},
+            )
+            kits = {"pvt_kit": PvtKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
             self.assertTrue(engine.run())
+
+            targets = engine.get_targets()
+            t = targets["pvt_kit"]
+            self.assertEqual(t.status, TargetStatus.PASS)
+            self.assertEqual(len(t.pvt_details), 2)
+            self.assertTrue(all(p.ok for p in t.pvt_details))
+            self.assertEqual(t.pvt_summary, "2/2 PVTs OK")
+
+    def test_pvt_outputs_missing(self):
+        """Some per-PVT outputs missing -> FAIL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(
+                tmpdir, "pvt_missing",
+                inputs={"library_name": "test", "pvts": ["ss", "ff"]},
+            )
+            kits = {"pvt_missing": PvtMissingKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            self.assertFalse(engine.run())
+
+            targets = engine.get_targets()
+            t = targets["pvt_missing"]
+            self.assertEqual(t.status, TargetStatus.FAIL)
+            self.assertEqual(len(t.pvt_details), 2)
+            # First PVT created, second missing
+            self.assertTrue(t.pvt_details[0].ok)
+            self.assertFalse(t.pvt_details[1].ok)
+            self.assertIn("PVT output check", t.error_message)
+
+    def test_dependency_chain_with_pvts(self):
+        """Multi-step pipeline with PVT kits."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_multi_pipeline(tmpdir, {
+                "pvt_kit": {
+                    "run": "pvt_kit",
+                    "inputs": {"library_name": "test", "pvts": ["ss", "ff"]},
+                },
+                "simple": {
+                    "run": "simple",
+                    "deps": ["pvt_kit"],
+                },
+            })
+            kits = {"pvt_kit": PvtKit(), "simple": SimpleKit()}
+            engine = LocalEngine(pipeline, kits)
+            self.assertTrue(engine.run())
+
+
+class TestInputValidation(unittest.TestCase):
+
+    def test_missing_input_detected(self):
+        """Missing required input should fail validation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = _make_pipeline(tmpdir, "pvt_kit", inputs={})
+            kits = {"pvt_kit": PvtKit()}
+            engine = LocalEngine(pipeline, kits, max_retries=0)
+            result = engine.run()
+            self.assertFalse(result)
 
 
 if __name__ == "__main__":

@@ -1,45 +1,49 @@
-# three_kit_config.yaml
-# Example configuration for the three-kit demo flow.
+# input.yaml — CWL-aligned kitdag pipeline configuration
 #
 # Demonstrates:
-#   - library_name: identifier for output naming
-#   - 3 PVT corners (kits with per-PVT targets read from extra.pvts)
-#   - kit_options in extra (per-kit overrides)
-#   - Domain-specific data in extra (pvts, cells, source_lib, etc.)
+#   - Steps with explicit inputs (no computation by kitdag)
+#   - PVTs as array input (kit runs once with full array)
+#   - Dependencies between steps
+#   - Standardized output: output_dir + log per kit
 
-library_name: demo_lib_7nm_trimmed
-
-# ── Paths ──
 output_root: /tmp/kitdag_demo_output
-upload_dest: /release/demo_lib_7nm_trimmed
-
-# ── Execution ──
-executor_type: local
+executor: local
 max_workers: 4
 
-# ── Spec Hashing (incremental detection) ──
-specs:
-  global:
-    cells_version: "2.1"
-  kits:
-    liberty:
-      trim_mode: conservative
-    timing_db:
-      db_format: "2017.06"
-    lef:
-      layer_version: "8.5"
+steps:
+  liberty:
+    run: liberty
+    in:
+      ref_dir: /data/source_libs/demo_lib_7nm/liberty
+      old_name: demo_lib
+      library_name: demo_lib_7nm_trimmed
+      pvts: [ss_0p75v_125c, tt_0p85v_25c, ff_0p99v_m40c]
+      cells: [INV_X1, NAND2_X1, BUF_X2]
+    out:
+      output_dir: /tmp/kitdag_demo_output/liberty
+      log: /tmp/kitdag_demo_output/liberty/liberty.log
+    dependencies: []
 
-# ── Domain-specific data ──
-extra:
-  pvts:
-    - ss_0p75v_125c
-    - tt_0p85v_25c
-    - ff_0p99v_m40c
-  cells:
-    - INV_X1
-    - NAND2_X1
-    - BUF_X2
-  source_lib: /data/source_libs/demo_lib_7nm
-  kit_options:
-    timing_db:
+  timing_db:
+    run: timing_db
+    in:
+      lib_dir: /tmp/kitdag_demo_output/liberty
+      library_name: demo_lib_7nm_trimmed
+      pvts: [ss_0p75v_125c, tt_0p85v_25c, ff_0p99v_m40c]
       compile_flags: "-no_pg"
+    out:
+      output_dir: /tmp/kitdag_demo_output/timing_db
+      log: /tmp/kitdag_demo_output/timing_db/timing_db.log
+    dependencies: [liberty]
+
+  lef:
+    run: lef
+    in:
+      ref_dir: /data/source_libs/demo_lib_7nm/lef
+      old_name: demo_lib
+      library_name: demo_lib_7nm_trimmed
+      cells: [INV_X1, NAND2_X1, BUF_X2]
+    out:
+      output_dir: /tmp/kitdag_demo_output/lef
+      log: /tmp/kitdag_demo_output/lef/lef.log
+    dependencies: []
