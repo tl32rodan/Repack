@@ -611,6 +611,39 @@ See `examples/three_kit_flow.py` for the full annotated source.
 
 ---
 
+## MCP Server (AI-Assisted Migration)
+
+An MCP server at `mcp_server/server.py` provides 5 tools for AI coding agents
+(e.g. qwen3\_235B) to assist with migrating legacy kits to Repack v2.
+
+| Tool | Description |
+|---|---|
+| `analyze_legacy_command` | Parse a legacy shell command; suggest Kit vs CornerBasedKit vs BinaryKitMixin |
+| `scaffold_kit` | Generate a complete kit class from name, type, deps, command template, outputs |
+| `validate_kit_file` | Check a kit file for missing methods, wrong base class, absolute paths |
+| `explain_dag` | Show execution stages, dependency edges, PVT matching type |
+| `check_migration_status` | Report which kits in a file are DONE vs TODO |
+
+**Usage:**
+
+```bash
+# MCP mode (requires `pip install mcp`)
+python mcp_server/server.py
+
+# Standalone mode (no dependencies)
+python mcp_server/server.py --tool analyze_legacy_command \
+    --args '{"command": "trim_liberty -pvt ss -ref /path -output /out"}'
+
+python mcp_server/server.py --tool validate_kit_file \
+    --args '{"file_path": "my_kits.py"}'
+```
+
+See `SKILL.md` for the full migration guide aimed at AI agents — it covers
+the classification decision tree, step-by-step migration process, common
+patterns, common mistakes, and a per-kit migration checklist.
+
+---
+
 ## Running Tests
 
 ```bash
