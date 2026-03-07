@@ -79,7 +79,7 @@ Extract:
 
 Look for which kits' outputs are used as inputs.  Examples:
 - timing_db reads from liberty output → `dependencies=["liberty"]`
-- lef reads only from the reference library → `dependencies=[]`
+- lef reads only from source_lib → `dependencies=[]`
 
 ### Step 3: Write the kit class
 
@@ -101,12 +101,14 @@ class MyKit(CornerBasedKit):  # or Kit for non-corner-based
     def construct_command(self, target: KitTarget, config: RepackConfig):
         # For CornerBasedKit: target.pvt is the corner string
         # For Kit: target.pvt is "ALL"
+        src = self.get_source_path(config)    # source_lib/my_kit/
         out_dir = os.path.join(self.get_output_path(config), target.pvt)
         out_file = os.path.join(out_dir, f"{config.library_name}_{target.pvt}.ext")
         return [
             "my_tool",
-            "--ref", os.path.join(config.ref_library_path, "my_kit", "..."),
+            "--ref", os.path.join(src, target.pvt, f"{config.ref_lib}.ext"),
             "--cells", ",".join(config.cells),
+            "--rename", f"{config.ref_lib}={config.library_name}",
             "--output", out_file,
         ]
 
@@ -130,7 +132,7 @@ def register_kits(config):
 ### Step 5: Test in debug mode
 
 ```bash
-repack run config.yaml --script kits.py --debug --max-retries 0
+repack run config.yaml --script kits.py --max-retries 0
 ```
 
 Check:
@@ -157,12 +159,13 @@ def construct_command(self, target, config):
 The DAG ensures `liberty::ss_0p75v_125c` completes before
 `timing_db::ss_0p75v_125c` starts (same-PVT matching).
 
-### Pattern B: Using rename_map
+### Pattern B: Renaming (old library → new library)
 
 ```python
-old_name = config.library_name
-new_name = config.rename_map.get(old_name, old_name)
-# Use new_name in the command or output path
+# config.ref_lib = "{old_name}_{old_ver}" (reference/source library name)
+# config.library_name = "{new_name}_{new_ver}" (target library name)
+# Use in rename operations:
+"--rename", f"{config.ref_lib}={config.library_name}",
 ```
 
 ### Pattern C: Per-kit options from kit_options
@@ -184,7 +187,7 @@ class PgvKit(BinaryKitMixin, CornerBasedKit):
         return {
             "pvt": target.pvt,
             "cells": config.cells,
-            "lib_name": config.rename_map.get(config.library_name, config.library_name),
+            "lib_name": config.library_name,
         }
 
     def get_utility_command(self, target, config, spec_path):
@@ -254,7 +257,7 @@ Legacy command: _______________
 [ ] get_log_error_patterns() checked (any tool-specific errors?)
 [ ] get_log_ignore_patterns() checked (any false-positive lines?)
 [ ] Added to register_kits()
-[ ] Tested in debug mode (repack run --debug --max-retries 0)
+[ ] Tested (repack run config.yaml --script kits.py --max-retries 0)
 [ ] All targets PASS
 [ ] Output files verified correct
 ```
@@ -288,10 +291,19 @@ This repo provides an MCP server (`mcp_server/server.py`) with tools to help you
 ## 8. YAML Config Quick Reference
 
 ```yaml
-library_name: my_lib_7nm          # reference library name
-ref_library_path: /path/to/ref    # source library path
-output_root: /path/to/output      # all outputs go here
+# ── Library Identity ──
+old_name: my_lib                   # reference library name
+old_ver: "7nm"                     # reference library version
+new_name: my_lib                   # target library name
+new_ver: "7nm_trimmed"             # target library version
+library_name: my_lib_7nm_trimmed   # auto-derived as {new_name}_{new_ver}
 
+# ── Paths ──
+source_lib: /path/to/source_lib    # pre-organized by upstream (by kit type)
+output_root: /path/to/output       # all outputs go here
+upload_dest: /path/to/release      # each kit has its own upload structure
+
+# ── What to Repack ──
 pvts:                              # PVT corners (for CornerBasedKit)
   - ss_0p75v_125c
   - tt_0p85v_25c
@@ -301,10 +313,7 @@ cells:                             # cells to include (empty = all)
   - INV_X1
   - NAND2_X1
 
-rename_map:                        # old name → new name
-  my_lib_7nm: my_lib_7nm_trimmed
-
-debug: true                        # true = skip upload
+# ── Execution ──
 executor_type: local               # "local" or "lsf"
 max_workers: 4                     # parallel threads
 

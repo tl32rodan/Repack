@@ -1,7 +1,7 @@
 # Repack v2
 
 A DAG-based utility for **renaming and trimming** standard cell library kits.
-Given a reference library, Repack orchestrates a set of user-defined *kits* — each responsible for producing one output artefact — with automatic dependency ordering, incremental re-runs, and strict false-negative prevention.
+Given a pre-organized `source_lib` (prepared by upstream), Repack orchestrates a set of user-defined *kits* — each responsible for producing one output artefact — by intersecting source files with specs (PVT corners, cell lists), with automatic dependency ordering, incremental re-runs, and strict false-negative prevention.
 
 ---
 
@@ -42,7 +42,7 @@ repack/
 ├── state/
 │   └── manager.py            # StateManager (CSV + spec-hash change detection)
 ├── upload/
-│   └── uploader.py           # cp-based upload, skipped in debug mode
+│   └── uploader.py           # cp-based upload with stale artifact cleanup
 ├── gui/
 │   ├── app.py                # MainWindow (QMainWindow)
 │   ├── summary_table.py      # Corner / Non-corner tabs with O / X / - status
@@ -92,9 +92,15 @@ YAML config ──► Kit registration (Python script)
 
 ```yaml
 # config.yaml
-library_name: my_lib_7nm
-ref_library_path: /data/ref_libs/my_lib_7nm
+old_name: my_lib
+old_ver: "7nm"
+new_name: my_lib
+new_ver: "7nm_trimmed"
+library_name: my_lib_7nm_trimmed     # auto-derived as {new_name}_{new_ver}
+
+source_lib: /data/source_libs/my_lib_7nm   # pre-organized by upstream
 output_root: /data/repack_output/my_lib_7nm
+upload_dest: /release/my_lib_7nm_trimmed
 
 pvts:
   - ss_0p75v_125c
@@ -105,13 +111,8 @@ cells:
   - INV_X1
   - NAND2_X1
 
-rename_map:
-  my_lib_7nm: my_lib_7nm_trimmed
-
-debug: false
 executor_type: local
 max_workers: 4
-upload_dest: /release/my_lib_7nm
 ```
 
 ### 2. Write kit definitions
@@ -127,9 +128,16 @@ class LibertyKit(CornerBasedKit):
         super().__init__(name="liberty", dependencies=[])
 
     def construct_command(self, target: KitTarget, config):
+        src = self.get_source_path(config)    # source_lib/liberty/
         out = os.path.join(self.get_output_path(config), target.pvt,
                            f"{config.library_name}_{target.pvt}.lib")
-        return ["trim_liberty", "--pvt", target.pvt, "--output", out]
+        return [
+            "trim_liberty",
+            "--ref", os.path.join(src, target.pvt, f"{config.ref_lib}_{target.pvt}.lib"),
+            "--cells", ",".join(config.cells),
+            "--rename", f"{config.ref_lib}={config.library_name}",
+            "--output", out,
+        ]
 
     def get_expected_outputs(self, target: KitTarget, config):
         return [os.path.join(target.pvt, f"{config.library_name}_{target.pvt}.lib")]
@@ -143,9 +151,6 @@ def register_kits(config):
 ```bash
 # Execute the pipeline
 repack run config.yaml --script kits.py
-
-# Debug mode — skips upload
-repack run config.yaml --script kits.py --debug
 
 # Launch GUI after execution
 repack run config.yaml --script kits.py --gui
@@ -165,26 +170,36 @@ All fields in `RepackConfig` can be set in the YAML file.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `library_name` | `str` | `""` | Name of the reference library being repacked |
-| `ref_library_path` | `str` | `""` | Path to the source reference library |
+| `old_name` | `str` | `""` | Reference library name (e.g., "my_lib") |
+| `old_ver` | `str` | `""` | Reference library version (e.g., "7nm") |
+| `new_name` | `str` | `""` | Target library name (e.g., "my_lib") |
+| `new_ver` | `str` | `""` | Target library version (e.g., "7nm_trimmed") |
+| `library_name` | `str` | `""` | Target library full name (`{new_name}_{new_ver}`); auto-derived if not set |
+| `source_lib` | `str` | `""` | Path to pre-organized source folder (by kit type: `source_lib/liberty/`, `source_lib/lef/`, etc.) |
 | `output_root` | `str` | `""` | Root directory for all kit outputs and state file |
+| `upload_dest` | `str` | `""` | Upload root path; each kit has its own upload structure |
 | `pvts` | `List[str]` | `[]` | PVT corner strings (used by `CornerBasedKit`) |
 | `cells` | `List[str]` | `[]` | Cells to include; empty = all cells |
-| `rename_map` | `Dict[str,str]` | `{}` | Old-name → new-name mapping applied during repack |
 | `kit_options` | `Dict[str,Dict]` | `{}` | Per-kit configuration overrides |
-| `debug` | `bool` | `False` | If `True`, skip the upload step |
 | `max_workers` | `int` | `4` | Max parallel workers (local executor) |
 | `executor_type` | `str` | `"local"` | `"local"` or `"lsf"` |
-| `upload_dest` | `str` | `""` | Destination path for upload (`cp`) |
 | `specs` | YAML section | — | Per-kit spec data for incremental change detection |
 | `extra` | `Dict` | `{}` | Catch-all for additional options |
+
+Derived property: `config.ref_lib` = `{old_name}_{old_ver}` (reference library full name).
 
 **Full YAML example with all fields:**
 
 ```yaml
-library_name: my_lib_7nm
-ref_library_path: /data/ref_libs/my_lib_7nm
+old_name: my_lib
+old_ver: "7nm"
+new_name: my_lib
+new_ver: "7nm_trimmed"
+library_name: my_lib_7nm_trimmed     # auto-derived as {new_name}_{new_ver}
+
+source_lib: /data/source_libs/my_lib_7nm   # pre-organized by upstream
 output_root: /data/repack_output/my_lib_7nm
+upload_dest: /release/my_lib_7nm_trimmed
 
 pvts:
   - ss_0p75v_125c
@@ -195,17 +210,12 @@ cells:
   - INV_X1
   - NAND2_X1
 
-rename_map:
-  my_lib_7nm: my_lib_7nm_trimmed
-
 kit_options:
   timing_db:
     compile_flags: "-no_pg"
 
-debug: false
 executor_type: local
 max_workers: 8
-upload_dest: /release/my_lib_7nm
 
 # Spec data drives incremental change detection.
 # When a kit's effective spec changes (global + kit-specific merged),
@@ -240,8 +250,9 @@ class LefKit(Kit):
 
     def construct_command(self, target: KitTarget, config) -> list:
         """Return the shell command that produces this kit's output."""
+        src = self.get_source_path(config)    # source_lib/lef/
         out = os.path.join(self.get_output_path(config), f"{config.library_name}.lef")
-        return ["trim_lef", "--ref", config.ref_library_path, "--output", out]
+        return ["trim_lef", "--ref", os.path.join(src, f"{config.ref_lib}.lef"), "--output", out]
 
     def get_expected_outputs(self, target: KitTarget, config) -> list:
         """Paths RELATIVE to get_output_path(config) that must exist after execution."""
@@ -282,13 +293,14 @@ class LibertyKit(CornerBasedKit):
 
     def construct_command(self, target: KitTarget, config) -> list:
         # target.pvt is e.g. "ss_0p75v_125c" — use it to select the right files.
+        src = self.get_source_path(config)    # source_lib/liberty/
         out_dir = os.path.join(self.get_output_path(config), target.pvt)
         out_file = os.path.join(out_dir, f"{config.library_name}_{target.pvt}.lib")
         return [
             "trim_liberty",
-            "--ref", os.path.join(config.ref_library_path, "liberty",
-                                  f"{config.library_name}_{target.pvt}.lib"),
+            "--ref", os.path.join(src, target.pvt, f"{config.ref_lib}_{target.pvt}.lib"),
             "--cells", ",".join(config.cells),
+            "--rename", f"{config.ref_lib}={config.library_name}",
             "--output", out_file,
         ]
 
@@ -319,7 +331,7 @@ class PgvKit(BinaryKitMixin, CornerBasedKit):
         return {
             "pvt": target.pvt,
             "cells": config.cells,
-            "lib_name": config.rename_map.get(config.library_name, config.library_name),
+            "lib_name": config.library_name,
         }
 
     def get_utility_command(self, target: KitTarget, config, spec_path: str) -> list:
@@ -454,13 +466,12 @@ repack [-v] <command> [options]
 Execute the full repack pipeline.
 
 ```
-repack run CONFIG --script KITS [--debug] [--gui]
+repack run CONFIG --script KITS [--gui]
               [--executor {local,lsf}] [--max-workers N]
               [--max-retries N]
 
   CONFIG          Path to YAML config file
   --script KITS   Python file defining register_kits(config)
-  --debug         Skip upload step
   --gui           Launch GUI after execution
   --executor      Override executor type (default from config)
   --max-workers   Override parallel worker count
@@ -593,7 +604,7 @@ A complete working example with three kits is in `examples/`:
 
 ```
 examples/
-├── three_kit_config.yaml   # YAML config (debug=true, local executor)
+├── three_kit_config.yaml   # YAML config (local executor)
 └── three_kit_flow.py       # Kit definitions + register_kits()
 ```
 

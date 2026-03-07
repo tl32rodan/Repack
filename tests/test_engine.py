@@ -79,7 +79,6 @@ def _make_config(tmpdir: str, pvts: List[str] = None) -> RepackConfig:
         library_name="test_lib",
         output_root=tmpdir,
         pvts=pvts or ["ss_100c", "ff_0c"],
-        debug=True,
         max_workers=2,
         specs=specs,
     )

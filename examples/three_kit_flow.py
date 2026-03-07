@@ -77,14 +77,13 @@ class LibertyKit(CornerBasedKit):
         out_file = os.path.join(out_dir, f"{config.library_name}_{target.pvt}.lib")
 
         # --- real-world command (site-specific tool) ---
-        # ref = os.path.join(config.ref_library_path, "liberty",
-        #                    f"{config.library_name}_{target.pvt}.lib")
-        # new_name = config.rename_map.get(config.library_name, config.library_name)
+        # src = self.get_source_path(config)  # source_lib/liberty/
+        # ref_file = os.path.join(src, target.pvt, f"{config.ref_lib}_{target.pvt}.lib")
         # return [
         #     "trim_liberty",
-        #     "--ref", ref,
+        #     "--ref", ref_file,
         #     "--cells", ",".join(config.cells),
-        #     "--rename", f"{config.library_name}={new_name}",
+        #     "--rename", f"{config.ref_lib}={config.library_name}",
         #     "--output", out_file,
         # ]
 
@@ -173,14 +172,13 @@ class LefKit(Kit):
         out_file = os.path.join(out_dir, f"{config.library_name}.lef")
 
         # --- real-world command ---
-        # ref = os.path.join(config.ref_library_path, "lef",
-        #                    f"{config.library_name}.lef")
-        # new_name = config.rename_map.get(config.library_name, config.library_name)
+        # src = self.get_source_path(config)  # source_lib/lef/
+        # ref_file = os.path.join(src, f"{config.ref_lib}.lef")
         # return [
         #     "trim_lef",
-        #     "--ref", ref,
+        #     "--ref", ref_file,
         #     "--cells", ",".join(config.cells),
-        #     "--rename", f"{config.library_name}={new_name}",
+        #     "--rename", f"{config.ref_lib}={config.library_name}",
         #     "--output", out_file,
         # ]
 
@@ -232,13 +230,16 @@ if __name__ == "__main__":
         specs.set_kit_spec("lef",      {"layer_version": "8.5"})
 
         config = RepackConfig(
-            library_name="demo_lib_7nm",
+            old_name="demo_lib",
+            old_ver="7nm",
+            new_name="demo_lib",
+            new_ver="7nm_trimmed",
+            library_name="demo_lib_7nm_trimmed",
+            source_lib="/data/source_libs/demo_lib_7nm",
             output_root=tempfile.mkdtemp(prefix="repack_demo_"),
             pvts=["ss_0p75v_125c", "tt_0p85v_25c", "ff_0p99v_m40c"],
             cells=["INV_X1", "NAND2_X1", "BUF_X2"],
-            rename_map={"demo_lib_7nm": "demo_lib_7nm_trimmed"},
             kit_options={"timing_db": {"compile_flags": "-no_pg"}},
-            debug=True,
             max_workers=4,
             specs=specs,
         )

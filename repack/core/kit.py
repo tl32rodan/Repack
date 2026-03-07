@@ -60,6 +60,14 @@ class Kit(ABC):
         """Return targets for this kit. Default: single ALL target."""
         return [KitTarget(kit_name=self.name, pvt="ALL")]
 
+    def get_source_path(self, config: Any) -> str:
+        """Return the source directory for this kit's inputs.
+
+        Default: {source_lib}/{kit_name}
+        Override for kits with non-standard source layout.
+        """
+        return os.path.join(config.source_lib, self.name)
+
     def get_output_path(self, config: Any) -> str:
         """Return the output directory for this kit's products."""
         return os.path.join(config.output_root, self.name)

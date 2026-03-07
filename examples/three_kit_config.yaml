@@ -2,15 +2,24 @@
 # Example configuration for the three-kit demo flow.
 #
 # Demonstrates:
+#   - Library identity: old_name/old_ver -> new_name/new_ver
+#   - source_lib: pre-organized source folder (by kit type)
 #   - 3 PVT corners (corner-based kits generate one target per corner)
-#   - rename_map (old library name -> new library name)
 #   - kit_options (per-kit overrides)
-#   - debug: true  ->  upload is skipped (safe for demo)
 
-library_name: demo_lib_7nm
-ref_library_path: /data/ref_libs/demo_lib_7nm  # not used by mock commands
+# ── Library Identity ──
+old_name: demo_lib
+old_ver: "7nm"
+new_name: demo_lib
+new_ver: "7nm_trimmed"
+library_name: demo_lib_7nm_trimmed   # auto-derived as {new_name}_{new_ver}
+
+# ── Paths ──
+source_lib: /data/source_libs/demo_lib_7nm    # not used by mock commands
 output_root: /tmp/repack_demo_output
+upload_dest: /release/demo_lib_7nm_trimmed    # each kit has its own upload structure
 
+# ── What to Repack ──
 pvts:
   - ss_0p75v_125c
   - tt_0p85v_25c
@@ -21,20 +30,15 @@ cells:
   - NAND2_X1
   - BUF_X2
 
-rename_map:
-  demo_lib_7nm: demo_lib_7nm_trimmed
-
-# debug: true skips the upload step
-debug: true
-
+# ── Per-kit Control ──
 executor_type: local
 max_workers: 4
-upload_dest: /release/demo_lib_7nm   # ignored when debug: true
 
 kit_options:
   timing_db:
     compile_flags: "-no_pg"
 
+# ── Spec Hashing (incremental detection) ──
 specs:
   global:
     cells_version: "2.1"

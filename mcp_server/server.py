@@ -162,7 +162,7 @@ def scaffold_kit(
         expected_outputs: Output file paths relative to output_path.
             May use {pvt} and {lib_name} placeholders.
         command_template: Shell command with placeholders:
-            {output_path}, {pvt}, {lib_name}, {ref_path}, {cells}, {new_name}.
+            {output_path}, {pvt}, {lib_name}, {source_path}, {cells}, {ref_lib}.
         log_error_patterns: Extra regex patterns for error detection in logs.
         log_ignore_patterns: Regex patterns to whitelist in log scanning.
 
@@ -213,7 +213,7 @@ def scaffold_kit(
             lines.append('            "pvt": target.pvt,')
         lines += [
             '            "cells": config.cells,',
-            '            "lib_name": config.rename_map.get(config.library_name, config.library_name),',
+            '            "lib_name": config.library_name,',
             "        }",
             "",
             "    def get_utility_command(self, target: KitTarget, config: RepackConfig, spec_path: str) -> list:",
@@ -233,7 +233,7 @@ def scaffold_kit(
             lines.append("        out_dir = self.get_output_path(config)")
 
         if command_template:
-            lines.append("        new_name = config.rename_map.get(config.library_name, config.library_name)")
+            lines.append("        src = self.get_source_path(config)  # source_lib/{kit_name}/")
             lines.append("        # TODO: Adjust command to match your tool's actual interface")
             lines.append("        return [")
             for part in command_template.split():

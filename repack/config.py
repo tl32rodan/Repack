@@ -14,43 +14,71 @@ class RepackConfig:
     """Global configuration for a repack run.
 
     Attributes:
-        library_name: Name of the reference library being repacked.
-        ref_library_path: Path to the reference library.
+        old_name: Reference library name (e.g., "my_lib").
+        old_ver: Reference library version (e.g., "1.0").
+        new_name: Target library name (e.g., "my_lib").
+        new_ver: Target library version (e.g., "2.0").
+        library_name: Target library full name ({new_name}_{new_ver}).
+            Used for renaming, uploading, output naming, and spec collection.
+        source_lib: Path to pre-organized source folder (by kit type).
+            Upstream copies reference library outputs here before repack runs.
+            Structure: source_lib/{kit_name}/...
         output_root: Root directory for repack outputs.
+        upload_dest: Upload root path. Each kit has its own upload structure.
         pvts: List of PVT corner strings (e.g., ["ss_0p75v_125c", "ff_0p99v_m40c"]).
         cells: List of cell names to include (empty = all cells).
-        rename_map: Mapping of old names to new names for renaming.
         kit_options: Per-kit configuration overrides.
-        debug: If True, skip upload step.
         max_workers: Max parallel jobs for local executor.
         executor_type: "local" or "lsf".
-        upload_dest: Destination path for upload (cp).
         specs: SpecCollection holding per-kit specs.
         extra: Catch-all for additional options.
     """
 
+    # ── Library Identity ──
+    old_name: str = ""
+    old_ver: str = ""
+    new_name: str = ""
+    new_ver: str = ""
     library_name: str = ""
-    ref_library_path: str = ""
+
+    # ── Paths ──
+    source_lib: str = ""
     output_root: str = ""
+    upload_dest: str = ""
+
+    # ── What to Repack ──
     pvts: List[str] = field(default_factory=list)
     cells: List[str] = field(default_factory=list)
-    rename_map: Dict[str, str] = field(default_factory=dict)
+
+    # ── Per-kit Control ──
     kit_options: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    debug: bool = False
+
+    # ── Execution ──
     max_workers: int = 4
     executor_type: str = "local"
-    upload_dest: str = ""
+
+    # ── Internals ──
     specs: SpecCollection = field(default_factory=SpecCollection)
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ref_lib(self) -> str:
+        """Full reference library name: '{old_name}_{old_ver}'."""
+        return f"{self.old_name}_{self.old_ver}" if self.old_ver else self.old_name
 
 
 def load_config(path: str) -> RepackConfig:
     """Load RepackConfig from a YAML file.
 
     Example YAML:
-        library_name: my_lib_7nm
-        ref_library_path: /path/to/ref
+        old_name: my_lib
+        old_ver: "1.0"
+        new_name: my_lib
+        new_ver: "2.0"
+        library_name: my_lib_2.0   # optional, auto-derived as {new_name}_{new_ver}
+        source_lib: /data/source_libs/my_lib_1.0
         output_root: /path/to/output
+        upload_dest: /release/my_lib_2.0
         pvts:
           - ss_0p75v_125c
           - tt_0p85v_25c
@@ -58,15 +86,11 @@ def load_config(path: str) -> RepackConfig:
         cells:
           - INV
           - NAND2
-        rename_map:
-          old_lib_name: new_lib_name
-        debug: false
         executor_type: lsf
         max_workers: 8
-        upload_dest: /release/path
         kit_options:
           liberty:
-            extra_flag: value
+            trim_mode: fast
         specs:
           global:
             some_global_param: value
@@ -92,18 +116,27 @@ def load_config(path: str) -> RepackConfig:
             for kit_name, kit_spec in kit_specs.items():
                 specs.set_kit_spec(kit_name, kit_spec)
 
+    # Auto-derive library_name from new_name + new_ver if not provided
+    new_name = raw.get("new_name", "")
+    new_ver = raw.get("new_ver", "")
+    library_name = raw.get("library_name", "")
+    if not library_name and new_name:
+        library_name = f"{new_name}_{new_ver}" if new_ver else new_name
+
     config = RepackConfig(
-        library_name=raw.get("library_name", ""),
-        ref_library_path=raw.get("ref_library_path", ""),
+        old_name=raw.get("old_name", ""),
+        old_ver=str(raw.get("old_ver", "")),
+        new_name=new_name,
+        new_ver=str(new_ver),
+        library_name=library_name,
+        source_lib=raw.get("source_lib", ""),
         output_root=raw.get("output_root", ""),
+        upload_dest=raw.get("upload_dest", ""),
         pvts=raw.get("pvts", []),
         cells=raw.get("cells", []),
-        rename_map=raw.get("rename_map", {}),
         kit_options=raw.get("kit_options", {}),
-        debug=raw.get("debug", False),
         max_workers=raw.get("max_workers", 4),
         executor_type=raw.get("executor_type", "local"),
-        upload_dest=raw.get("upload_dest", ""),
         specs=specs,
         extra=raw.get("extra", {}),
     )

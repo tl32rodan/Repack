@@ -24,9 +24,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--script", help="Path to Python script defining kits"
     )
     run_parser.add_argument(
-        "--debug", action="store_true", help="Enable debug mode (skip upload)"
-    )
-    run_parser.add_argument(
         "--executor", choices=["local", "lsf"], default=None,
         help="Override executor type"
     )
@@ -137,16 +134,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         config = converter.from_ddi_sh(args.ddi_sh)
         # Serialize to YAML (simplified)
         data = {
+            "old_name": config.old_name,
+            "old_ver": config.old_ver,
+            "new_name": config.new_name,
+            "new_ver": config.new_ver,
             "library_name": config.library_name,
-            "ref_library_path": config.ref_library_path,
+            "source_lib": config.source_lib,
             "output_root": config.output_root,
+            "upload_dest": config.upload_dest,
             "pvts": config.pvts,
             "cells": config.cells,
-            "rename_map": config.rename_map,
-            "debug": config.debug,
             "executor_type": config.executor_type,
             "max_workers": config.max_workers,
-            "upload_dest": config.upload_dest,
             "extra": config.extra,
         }
         with open(args.output, "w") as f:
@@ -158,8 +157,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     config = load_config(args.config)
 
     # Apply CLI overrides
-    if hasattr(args, "debug") and args.debug:
-        config.debug = True
     if hasattr(args, "executor") and args.executor:
         config.executor_type = args.executor
     if hasattr(args, "max_workers") and args.max_workers:

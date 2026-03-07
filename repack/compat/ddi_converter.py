@@ -42,19 +42,29 @@ class DDIConverter:
     # ================================================================
     ARG_MAP: Dict[str, str] = {
         # Example mappings (replace with actual legacy flags):
-        # "-lib_name": "library_name",
-        # "-ref_path": "ref_library_path",
+        # "-old_name": "old_name",
+        # "-old_ver": "old_ver",
+        # "-new_name": "new_name",
+        # "-new_ver": "new_ver",
+        # "-source_lib": "source_lib",
         # "-out_dir": "output_root",
         # "-pvt_list": "pvts",        # needs _transform_value
         # "-cell_list": "cells",      # needs _transform_value
         # "-upload_path": "upload_dest",
-        # "-debug": "debug",          # flag, no value
     }
 
-    # Flags that don't take a value (presence = True)
+    # Flags that don't take a value (presence = True).
+    # -gen_{kit} flags are boolean: presence means "generate this kit".
+    # They are collected separately and used to determine which kits
+    # register_kits() returns. They do NOT go into RepackConfig.
     BOOLEAN_FLAGS: set = {
-        # "-debug",
+        # "-gen_liberty",
+        # "-gen_lef",
+        # "-gen_timing_db",
     }
+
+    # Prefix for gen flags. Matched flags are collected into gen_kits set.
+    GEN_FLAG_PREFIX: str = "-gen_"
 
     def from_ddi_sh(self, ddi_sh_path: str) -> RepackConfig:
         """Parse a ddi.sh file and convert to RepackConfig.
@@ -137,8 +147,15 @@ class DDIConverter:
         """Build RepackConfig from parsed arguments."""
         config_kwargs: Dict[str, Any] = {}
         extra: Dict[str, Any] = {}
+        self.gen_kits: set = set()
 
         for flag, value in raw_args.items():
+            # Collect -gen_{kit} flags separately
+            if flag.startswith(self.GEN_FLAG_PREFIX):
+                kit_name = flag[len(self.GEN_FLAG_PREFIX):]
+                self.gen_kits.add(kit_name)
+                continue
+
             if flag in self.ARG_MAP:
                 field = self.ARG_MAP[flag]
                 config_kwargs[field] = self._transform_value(field, value)
@@ -147,6 +164,14 @@ class DDIConverter:
                 extra[flag.lstrip("-")] = value
 
         config_kwargs["extra"] = extra
+
+        # Auto-derive library_name from new_name + new_ver if available
+        new_name = config_kwargs.get("new_name", "")
+        new_ver = config_kwargs.get("new_ver", "")
+        if new_name and "library_name" not in config_kwargs:
+            config_kwargs["library_name"] = (
+                f"{new_name}_{new_ver}" if new_ver else new_name
+            )
 
         # Build SpecCollection from args
         specs = self._build_specs(raw_args)
@@ -162,10 +187,6 @@ class DDIConverter:
         # List fields: split comma-separated values
         if field in ("pvts", "cells"):
             return [v.strip() for v in value.split(",") if v.strip()]
-
-        # Boolean fields
-        if field == "debug":
-            return value.lower() in ("true", "1", "yes")
 
         # Integer fields
         if field == "max_workers":

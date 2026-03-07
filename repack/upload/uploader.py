@@ -37,15 +37,9 @@ class Uploader:
     def upload_all(self, kits: List[Kit]) -> bool:
         """Upload all kit outputs to upload_dest.
 
-        Skipped entirely if config.debug is True.
-
         Returns:
             True if all uploads succeeded.
         """
-        if self.config.debug:
-            logger.info("DEBUG mode: skipping upload")
-            return True
-
         if not self.config.upload_dest:
             logger.warning("No upload_dest configured, skipping upload")
             return True
