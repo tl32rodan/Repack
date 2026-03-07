@@ -1,161 +1,120 @@
-import subprocess
-import os
-import threading
-from concurrent.futures import ThreadPoolExecutor, Future, wait
-from typing import List, Dict, Set, Callable
+"""LocalExecutor - ThreadPool-based local job execution."""
 
-from .base import Executor, Job
+import logging
+import os
+import subprocess
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Dict, Optional, Set
+
+from repack.executor.base import Executor, Job
+
+logger = logging.getLogger(__name__)
+
 
 class LocalExecutor(Executor):
-    def __init__(self, max_workers: int = 1):
-        self.pool = ThreadPoolExecutor(max_workers=max_workers)
-        self.futures: Dict[str, Future] = {}
-        self.lock = threading.Lock()
-        # Track pending dependencies for jobs that haven't started
-        self.pending_dependencies: Dict[str, Set[str]] = {}
-        self.jobs: Dict[str, Job] = {}
-        self.callbacks: Dict[str, Callable[[str, bool], None]] = {}
+    """Execute jobs locally using a thread pool.
 
-    def submit(self, job: Job, dependency_job_ids: List[str] = None, on_complete: Callable[[str, bool], None] = None) -> str:
-        self.jobs[job.id] = job
-        if on_complete:
-            self.callbacks[job.id] = on_complete
+    Dependencies are tracked: a job waits until all its dependencies
+    have completed successfully before starting.
+    """
 
-        job_future = Future()
+    def __init__(self, max_workers: int = 4):
+        self._max_workers = max_workers
+        self._pool: Optional[ThreadPoolExecutor] = None
+        self._jobs: Dict[str, Job] = {}
+        self._futures: Dict[str, Future] = {}
+        self._results: Dict[str, bool] = {}
+        self._done: Set[str] = set()
+        self._failed: Set[str] = set()
 
-        with self.lock:
-            self.futures[job.id] = job_future
+    def submit(self, job: Job) -> None:
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
 
-            # Check dependencies
-            pending = set()
-            dependency_failed = False
+        self._jobs[job.id] = job
+        future = self._pool.submit(self._run_job, job)
+        self._futures[job.id] = future
 
-            if dependency_job_ids:
-                for dep_id in dependency_job_ids:
-                    dep_future = self.futures.get(dep_id)
-                    if not dep_future:
-                        # Dependency not found/not submitted.
-                        # In this framework, engine submits in topological order, so deps should exist.
-                        # Unless filtered out? The engine logic ensures only submitted deps are passed.
-                        continue
+    def _run_job(self, job: Job) -> bool:
+        # Wait for dependencies
+        while True:
+            unmet = job.dependencies - self._done
+            if not unmet:
+                break
+            # Check if any dependency failed
+            if unmet & self._failed:
+                logger.warning(
+                    "Job %s skipped: dependency failed (%s)",
+                    job.id, unmet & self._failed,
+                )
+                self._failed.add(job.id)
+                self._done.add(job.id)
+                self._results[job.id] = False
+                self._notify(job.id, False)
+                return False
+            time.sleep(0.1)
 
-                    if dep_future.done():
-                        # Check if it failed
-                        try:
-                            dep_future.result()
-                        except:
-                            dependency_failed = True
-                            break
-                    else:
-                        pending.add(dep_id)
+        # Execute
+        os.makedirs(os.path.dirname(job.log_path) if job.log_path else ".", exist_ok=True)
+        log_file = open(job.log_path, "w") if job.log_path else None
 
-            if dependency_failed:
-                # Fail immediately
-                job_future.set_exception(Exception(f"Dependency failed"))
-                if on_complete:
-                    # Notify failure
-                    # We need to run this likely in a separate thread or immediately?
-                    # Safer to submit to pool to avoid blocking caller
-                    self.pool.submit(on_complete, job.id, False)
-                return job.id
-
-            if not pending:
-                # No running dependencies, submit immediately
-                self.pool.submit(self._run_job, job, job_future)
-            else:
-                self.pending_dependencies[job.id] = pending
-                # Add callbacks
-                for dep_id in pending:
-                    self.futures[dep_id].add_done_callback(lambda f, jid=job.id, did=dep_id: self._on_dependency_complete(jid, did))
-
-        return job.id
-
-    def _on_dependency_complete(self, job_id: str, dep_id: str):
-        # Check if dependency failed
-        dep_future = self.futures.get(dep_id)
-        dep_failed = False
         try:
-            if dep_future:
-                dep_future.result()
-        except:
-            dep_failed = True
-
-        with self.lock:
-            # Check if job is already done (e.g. failed by another dependency)
-            if self.futures[job_id].done():
-                return
-
-            if dep_failed:
-                # Fail this job
-                self.futures[job_id].set_exception(Exception(f"Dependency {dep_id} failed"))
-                # Cleanup pending
-                if job_id in self.pending_dependencies:
-                    del self.pending_dependencies[job_id]
-
-                # Notify callback
-                cb = self.callbacks.get(job_id)
-                if cb:
-                    self.pool.submit(cb, job_id, False)
-                return
-
-            if job_id not in self.pending_dependencies:
-                return
-
-            deps = self.pending_dependencies[job_id]
-            if dep_id in deps:
-                deps.remove(dep_id)
-
-            if not deps:
-                # All dependencies done and successful
-                del self.pending_dependencies[job_id]
-                job = self.jobs[job_id]
-                job_future = self.futures[job_id]
-                self.pool.submit(self._run_job, job, job_future)
-
-    def _run_job(self, job: Job, future: Future):
-        success = False
-        try:
-            # Ensure output dir exists
-            os.makedirs(os.path.dirname(job.log_path), exist_ok=True)
-
-            with open(job.log_path, 'w') as log_file:
-                # Write header
-                log_file.write(f"Executing: {' '.join(job.command)}\n")
-                log_file.write(f"CWD: {job.cwd}\n")
+            if log_file:
+                log_file.write(f"# Job: {job.id}\n")
+                log_file.write(f"# Command: {' '.join(job.command)}\n")
+                log_file.write(f"# CWD: {job.cwd}\n")
+                log_file.write(f"# Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_file.write("# " + "=" * 60 + "\n")
                 log_file.flush()
 
-                process = subprocess.Popen(
-                    job.command,
-                    cwd=job.cwd,
-                    env={**os.environ, **job.environment},
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT
-                )
-                rc = process.wait()
+            env = dict(os.environ)
+            env.update(job.environment)
 
-                if rc == 0:
-                    success = True
-                    future.set_result(True)
-                else:
-                    success = False
-                    future.set_exception(Exception(f"Job {job.id} failed with exit code {rc}"))
+            result = subprocess.run(
+                job.command,
+                cwd=job.cwd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+
+            success = result.returncode == 0
+            if log_file:
+                log_file.write(f"\n# Exit code: {result.returncode}\n")
 
         except Exception as e:
             success = False
-            future.set_exception(e)
+            if log_file:
+                log_file.write(f"\n# EXCEPTION: {e}\n")
+            logger.exception("Job %s failed with exception", job.id)
         finally:
-            cb = self.callbacks.get(job.id)
-            if cb:
-                cb(job.id, success)
+            if log_file:
+                log_file.close()
 
-    def wait(self, job_ids: List[str]) -> None:
-        fs = []
-        with self.lock:
-            for jid in job_ids:
-                if jid in self.futures:
-                    fs.append(self.futures[jid])
+        if success:
+            self._done.add(job.id)
+        else:
+            self._failed.add(job.id)
+            self._done.add(job.id)
 
-        wait(fs)
+        self._results[job.id] = success
+        self._notify(job.id, success)
+        return success
 
-    def shutdown(self):
-        self.pool.shutdown(wait=True)
+    def wait_all(self) -> Dict[str, bool]:
+        for future in self._futures.values():
+            future.result()
+
+        if self._pool:
+            self._pool.shutdown(wait=True)
+            self._pool = None
+
+        return dict(self._results)
+
+    def cancel_all(self) -> None:
+        for future in self._futures.values():
+            future.cancel()
+        if self._pool:
+            self._pool.shutdown(wait=False)
+            self._pool = None

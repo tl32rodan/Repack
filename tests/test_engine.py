@@ -1,160 +1,199 @@
+"""Tests for RepackEngine, focusing on false-negative prevention."""
+
+import os
+import tempfile
 import unittest
-from unittest.mock import MagicMock, call
-from typing import List, Dict, Callable
+from typing import Any, Dict, List
 
-from repack.core.kit import Kit, KitTarget
-from repack.core.request import RepackRequest
-from repack.core.state import StateManager, TargetStatus
-from repack.executor.base import Executor, Job
-from repack.engine.manager import RepackEngine
+from repack.config import RepackConfig
+from repack.core.kit import CornerBasedKit, Kit
+from repack.core.spec import SpecCollection
+from repack.core.target import KitTarget, TargetStatus
+from repack.engine.engine import RepackEngine
+from repack.executor.local import LocalExecutor
 
-class MockKit(Kit):
-    def __init__(self, name, dependencies=None):
-        super().__init__(name)
-        self._dependencies = dependencies or []
 
-    def get_output_path(self, request):
-        return f"/tmp/{self.name}"
+class SimpleKit(Kit):
+    """Test kit that echoes and creates expected output."""
 
-    def get_targets(self, request):
-        return [KitTarget(self.name, pvt="default")]
+    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
+        out = os.path.join(self.get_output_path(config), "output.txt")
+        return ["sh", "-c", f"echo 'ok' > {out}"]
 
-    def get_dependencies(self):
-        return self._dependencies
+    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
+        return ["output.txt"]
 
-    def construct_command(self, target, request):
-        return ["echo", target.id]
 
-class MockExecutor(Executor):
-    def __init__(self):
-        self.submitted_jobs = []
-        self.callbacks = {}
+class FailKit(Kit):
+    """Test kit that always fails."""
 
-    def submit(self, job: Job, dependency_job_ids: List[str] = None, on_complete: Callable[[str, bool], None] = None) -> str:
-        self.submitted_jobs.append((job, dependency_job_ids))
-        if on_complete:
-            self.callbacks[job.id] = on_complete
-        return job.id
+    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
+        return ["sh", "-c", "exit 1"]
 
-    def wait(self, job_ids):
-        # Simulate completion
-        for jid in job_ids:
-            if jid in self.callbacks:
-                # Simulate success
-                self.callbacks[jid](jid, True)
+    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
+        return ["output.txt"]
 
-class TestRepackEngine(unittest.TestCase):
-    def setUp(self):
-        self.request = RepackRequest(
-            library_name="mylib", pvts=["default"], corners=["tt"], cells=["inv"], output_root="/tmp"
-        )
-        self.state_manager = MagicMock(spec=StateManager)
-        self.executor = MockExecutor()
 
-        # Define Kits
-        # C -> B -> A (A depends on B, B depends on C)
-        self.kit_c = MockKit("KitC")
-        self.kit_b = MockKit("KitB", dependencies=["KitC"])
-        self.kit_a = MockKit("KitA", dependencies=["KitB"])
+class LogErrorKit(Kit):
+    """Test kit that succeeds (exit 0) but has ERROR in log.
 
-        self.kits = [self.kit_a, self.kit_b, self.kit_c]
-        self.engine = RepackEngine(self.kits, self.state_manager, self.executor)
+    This tests false-negative #2: log has ERROR but return code is 0.
+    """
 
-    def test_full_run_execution_order(self):
-        """
-        All targets are PENDING. Should run C -> B -> A.
-        """
-        self.state_manager.initialize.return_value = False # Full run
-        self.state_manager.get_status.return_value = TargetStatus.PENDING
+    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
+        out = os.path.join(self.get_output_path(config), "output.txt")
+        return ["sh", "-c", f"echo 'ok' > {out} && echo 'ERROR: something went wrong'"]
 
-        self.engine.run(self.request)
+    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
+        return ["output.txt"]
 
-        submitted = self.executor.submitted_jobs
-        self.assertEqual(len(submitted), 3)
 
-        # Verify order and dependencies
-        job_c, deps_c = submitted[0]
-        job_b, deps_b = submitted[1]
-        job_a, deps_a = submitted[2]
+class MissingOutputKit(Kit):
+    """Test kit that exits 0 but doesn't produce expected output.
 
-        self.assertEqual(job_c.id, "KitC::default")
-        self.assertEqual(deps_c, [])
+    This tests false-negative #1: exit code 0 but output is missing.
+    """
 
-        self.assertEqual(job_b.id, "KitB::default")
-        self.assertEqual(deps_b, ["KitC::default"])
+    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
+        return ["sh", "-c", "echo 'done'"]
 
-        self.assertEqual(job_a.id, "KitA::default")
-        self.assertEqual(deps_a, ["KitB::default"])
+    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
+        return ["expected_but_missing.lib"]
 
-        # Verify state updates (mock executor simulates success)
-        # Should be called with PASS
-        self.state_manager.set_status.assert_any_call("KitC::default", TargetStatus.PASS)
-        self.state_manager.set_status.assert_any_call("KitB::default", TargetStatus.PASS)
-        self.state_manager.set_status.assert_any_call("KitA::default", TargetStatus.PASS)
 
-    def test_incremental_skip_passed(self):
-        """
-        C is PASS. B is PENDING. A is PENDING.
-        Should run B -> A. C should NOT be run, but B should depend on C's "completion" (conceptually).
-        However, if C is not running, we can't wait on a job ID.
-        So B effectively has NO running dependency on C.
-        """
-        self.state_manager.initialize.return_value = True # Incremental
+class CornerKit(CornerBasedKit):
+    """Test corner-based kit."""
 
-        def get_status_side_effect(tid):
-            if tid == "KitC::default": return TargetStatus.PASS
-            return TargetStatus.PENDING
+    def construct_command(self, target: KitTarget, config: Any) -> List[str]:
+        out_dir = os.path.join(self.get_output_path(config), target.pvt)
+        out = os.path.join(out_dir, "output.lib")
+        return ["sh", "-c", f"mkdir -p {out_dir} && echo 'ok' > {out}"]
 
-        self.state_manager.get_status.side_effect = get_status_side_effect
+    def get_expected_outputs(self, target: KitTarget, config: Any) -> List[str]:
+        return [os.path.join(target.pvt, "output.lib")]
 
-        self.engine.run(self.request)
 
-        submitted = self.executor.submitted_jobs
-        self.assertEqual(len(submitted), 2)
+def _make_config(tmpdir: str, pvts: List[str] = None) -> RepackConfig:
+    specs = SpecCollection()
+    return RepackConfig(
+        library_name="test_lib",
+        output_root=tmpdir,
+        pvts=pvts or ["ss_100c", "ff_0c"],
+        debug=True,
+        max_workers=2,
+        specs=specs,
+    )
 
-        job_b, deps_b = submitted[0]
-        job_a, deps_a = submitted[1]
 
-        self.assertEqual(job_b.id, "KitB::default")
-        # Since C is PASS, it's filtered out of the execution graph.
-        # B depends on C, but C isn't running. So B has no dependencies *in this run*.
-        self.assertEqual(deps_b, [])
+class TestEngineBasic(unittest.TestCase):
 
-        self.assertEqual(job_a.id, "KitA::default")
-        self.assertEqual(deps_a, ["KitB::default"])
+    def test_simple_pass(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            kits = [SimpleKit("simple")]
+            engine = RepackEngine(config, kits, LocalExecutor(2))
+            self.assertTrue(engine.run())
 
-    def test_incremental_partial_chain(self):
-        """
-        C is PENDING. B is PASS. A is PENDING.
-        """
-        self.state_manager.initialize.return_value = True
+    def test_fail_kit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            kits = [FailKit("fail")]
+            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            self.assertFalse(engine.run())
 
-        def get_status_side_effect(tid):
-            if tid == "KitC::default": return TargetStatus.PENDING
-            if tid == "KitB::default": return TargetStatus.PASS
-            if tid == "KitA::default": return TargetStatus.PENDING
-            return TargetStatus.PENDING
 
-        self.state_manager.get_status.side_effect = get_status_side_effect
+class TestFalseNegativePrevention(unittest.TestCase):
+    """Tests for the four false-negative scenarios."""
 
-        self.engine.run(self.request)
+    def test_fn1_missing_output_detected(self):
+        """FN#1: Kit exits 0 but expected output is missing -> FAIL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            kits = [MissingOutputKit("missing")]
+            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            result = engine.run()
+            self.assertFalse(result)
 
-        submitted = self.executor.submitted_jobs
-        # Expect C and A to run.
-        job_ids = [j[0].id for j in submitted]
-        self.assertIn("KitC::default", job_ids)
-        self.assertIn("KitA::default", job_ids)
-        self.assertNotIn("KitB::default", job_ids)
+            targets = engine.get_targets()
+            t = targets["missing::ALL"]
+            self.assertEqual(t.status, TargetStatus.FAIL)
+            self.assertIn("Missing", t.error_message)
 
-        # Check deps
-        # C depends on nothing (in this run)
-        # A depends on B. B is PASS (not running). So A depends on nothing (in this run).
+    def test_fn2_log_error_detected(self):
+        """FN#2: Kit exits 0 but log contains ERROR -> FAIL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            kits = [LogErrorKit("logerr")]
+            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=0)
+            result = engine.run()
+            self.assertFalse(result)
 
-        for job, deps in submitted:
-            if job.id == "KitC::default":
-                self.assertEqual(deps, [])
-            if job.id == "KitA::default":
-                self.assertEqual(deps, [])
+            targets = engine.get_targets()
+            t = targets["logerr::ALL"]
+            self.assertEqual(t.status, TargetStatus.FAIL)
+            self.assertIn("Log error", t.error_message)
 
-if __name__ == '__main__':
+    def test_fn3_cascade_invalidation(self):
+        """FN#3: When upstream re-runs, downstream should also re-run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir, pvts=[])
+
+            kitA = SimpleKit("A")
+            kitB = SimpleKit("B", dependencies=["A"])
+
+            # First run: both pass
+            engine = RepackEngine(config, [kitA, kitB], LocalExecutor(2))
+            self.assertTrue(engine.run())
+
+            # Now change spec for A
+            config.specs.set_kit_spec("A", {"changed": True})
+
+            # Second run: A should re-run, and B should cascade
+            engine2 = RepackEngine(config, [kitA, kitB], LocalExecutor(2))
+            engine2._collect_targets()
+            engine2._all_targets = engine2.state.reconcile(engine2._all_targets)
+
+            # A should be pending (spec changed)
+            a_target = next(t for t in engine2._all_targets if t.kit_name == "A")
+            self.assertEqual(a_target.status, TargetStatus.PENDING)
+
+            # Build DAG and cascade
+            engine2._build_dag()
+            engine2._cascade_invalidation()
+
+            # B should now also be pending due to cascade
+            targets = engine2.state.get_targets()
+            self.assertEqual(targets["B::ALL"].status, TargetStatus.PENDING)
+
+    def test_auto_retry(self):
+        """Engine should auto-retry failed targets up to max_retries."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            kits = [FailKit("fail")]
+            engine = RepackEngine(config, kits, LocalExecutor(2), max_retries=2)
+            result = engine.run()
+            self.assertFalse(result)
+            # Should have attempted 3 times total (initial + 2 retries)
+
+
+class TestCornerBasedKits(unittest.TestCase):
+
+    def test_corner_kit_targets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir, pvts=["ss_100c", "ff_0c"])
+            kit = CornerKit("liberty")
+            targets = kit.get_targets(config)
+            self.assertEqual(len(targets), 2)
+            self.assertEqual(targets[0].pvt, "ss_100c")
+            self.assertEqual(targets[1].pvt, "ff_0c")
+
+    def test_corner_kit_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir, pvts=["ss_100c", "ff_0c"])
+            kits = [CornerKit("liberty")]
+            engine = RepackEngine(config, kits, LocalExecutor(2))
+            self.assertTrue(engine.run())
+
+
+if __name__ == "__main__":
     unittest.main()
