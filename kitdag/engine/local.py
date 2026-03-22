@@ -1,46 +1,41 @@
-"""LocalEngine — runs kits locally using subprocess."""
+"""LocalEngine — runs tasks locally using subprocess."""
 
 import logging
 import os
 import subprocess
-from typing import Dict, List
+from typing import Any, Dict
 
-from kitdag.core.kit import Kit
-from kitdag.core.target import KitTarget
+from kitdag.core.step import Step
+from kitdag.core.task import Task
 from kitdag.engine.base import BaseEngine
-from kitdag.pipeline import PipelineConfig, StepConfig
 
 logger = logging.getLogger(__name__)
 
 
 class LocalEngine(BaseEngine):
-    """Executes kits as local subprocesses."""
+    """Executes tasks as local subprocesses."""
 
-    def _execute_step(self, target: KitTarget, kit: Kit, step: StepConfig) -> bool:
-        """Execute a single kit step as a local subprocess."""
-        # Build merged inputs (step inputs + output_dir)
-        merged_inputs = dict(step.inputs)
-        merged_inputs["output_dir"] = target.output_dir
-
-        command = kit.get_command(merged_inputs)
+    def _execute_task(self, task: Task, step: Step, inputs: Dict[str, Any]) -> bool:
+        """Execute a single task as a local subprocess."""
+        command = step.get_command(inputs)
         if not command:
-            logger.error("Kit %s produced empty command", kit.name)
+            logger.error("Step %s produced empty command", step.name)
             return False
 
-        logger.info("Executing %s: %s", target.id, " ".join(command))
+        logger.info("Executing %s: %s", task.id, " ".join(command))
 
         try:
             log_file = None
-            if target.log_path:
-                os.makedirs(os.path.dirname(target.log_path), exist_ok=True)
-                log_file = open(target.log_path, "w")
+            if task.log_path:
+                os.makedirs(os.path.dirname(task.log_path), exist_ok=True)
+                log_file = open(task.log_path, "w")
 
             result = subprocess.run(
                 command,
-                cwd=target.output_dir or None,
+                cwd=task.output_dir or None,
                 stdout=log_file or subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                timeout=3600,  # 1 hour default timeout
+                timeout=3600,
             )
 
             if log_file:
@@ -49,7 +44,7 @@ class LocalEngine(BaseEngine):
             return result.returncode == 0
 
         except subprocess.TimeoutExpired:
-            logger.error("Target %s timed out", target.id)
+            logger.error("Task %s timed out", task.id)
             if log_file and not log_file.closed:
                 log_file.close()
             return False
@@ -59,7 +54,7 @@ class LocalEngine(BaseEngine):
                 log_file.close()
             return False
         except Exception as e:
-            logger.error("Target %s execution error: %s", target.id, e)
+            logger.error("Task %s execution error: %s", task.id, e)
             if log_file and not log_file.closed:
                 log_file.close()
             return False

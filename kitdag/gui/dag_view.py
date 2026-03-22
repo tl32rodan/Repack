@@ -1,21 +1,13 @@
 """DAG visualization widget using QGraphicsView."""
 
 import math
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PySide2.QtCore import QPointF, QRectF, Qt, Signal
-from PySide2.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QPainter,
-    QPainterPath,
-    QPen,
-)
+from PySide2.QtCore import QPointF, Qt, Signal
+from PySide2.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide2.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
-    QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -25,15 +17,15 @@ from PySide2.QtWidgets import (
 )
 
 from kitdag.core.dag import DAGBuilder
-from kitdag.core.target import KitTarget, TargetStatus
+from kitdag.core.task import Task, TaskStatus
 
 
 STATUS_COLORS = {
-    TargetStatus.PASS: QColor(76, 175, 80),
-    TargetStatus.FAIL: QColor(244, 67, 54),
-    TargetStatus.SKIP: QColor(158, 158, 158),
-    TargetStatus.PENDING: QColor(255, 193, 7),
-    TargetStatus.RUNNING: QColor(33, 150, 243),
+    TaskStatus.PASS: QColor(76, 175, 80),
+    TaskStatus.FAIL: QColor(244, 67, 54),
+    TaskStatus.SKIP: QColor(158, 158, 158),
+    TaskStatus.PENDING: QColor(255, 193, 7),
+    TaskStatus.RUNNING: QColor(33, 150, 243),
 }
 
 NODE_WIDTH = 120
@@ -43,9 +35,9 @@ V_SPACING = 70
 
 
 class _NodeItem(QGraphicsEllipseItem):
-    """A single DAG node (rounded rect via ellipse)."""
+    """A single DAG node."""
 
-    def __init__(self, target_id: str, status: TargetStatus,
+    def __init__(self, target_id: str, status: TaskStatus,
                  x: float, y: float):
         super().__init__(x, y, NODE_WIDTH, NODE_HEIGHT)
         self.target_id = target_id
@@ -56,11 +48,9 @@ class _NodeItem(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setToolTip(f"{target_id} [{status.value}]")
 
-        # Label
         label = QGraphicsSimpleTextItem(self._short_label(target_id), self)
         label.setFont(QFont("Sans", 7))
         label.setBrush(QBrush(QColor(255, 255, 255)))
-        # Center text
         bounds = label.boundingRect()
         label.setPos(
             x + (NODE_WIDTH - bounds.width()) / 2,
@@ -69,15 +59,21 @@ class _NodeItem(QGraphicsEllipseItem):
 
     @staticmethod
     def _short_label(target_id: str) -> str:
-        if len(target_id) > 12:
-            return target_id[:10] + ".."
+        # Show step/branch for scoped IDs
+        parts = target_id.split("/")
+        if len(parts) >= 3:
+            # step/lib=x/branch=y → step/y
+            branch = parts[-1].split("=")[-1] if "=" in parts[-1] else parts[-1]
+            return f"{parts[0]}/{branch}"
+        if len(target_id) > 14:
+            return target_id[:12] + ".."
         return target_id
 
 
 class DAGViewWidget(QWidget):
-    """Visualize the target dependency graph."""
+    """Visualize the task dependency graph."""
 
-    node_selected = Signal(str)  # emits target_id
+    node_selected = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -93,7 +89,7 @@ class DAGViewWidget(QWidget):
         self._scene.selectionChanged.connect(self._on_selection_changed)
 
     def update_dag(self, dag: DAGBuilder,
-                   targets: Dict[str, KitTarget]) -> None:
+                   tasks: Dict[str, Task]) -> None:
         """Rebuild the DAG visualization."""
         self._scene.clear()
 
@@ -102,21 +98,17 @@ class DAGViewWidget(QWidget):
             return
 
         node_positions: Dict[str, Tuple[float, float]] = {}
-        node_items: Dict[str, _NodeItem] = {}
 
-        # Layout: stages left to right, nodes in each stage top to bottom
         for stage_idx, stage in enumerate(stages):
             x = stage_idx * H_SPACING + 20
             for node_idx, tid in enumerate(stage):
                 y = node_idx * V_SPACING + 20
-                status = targets[tid].status if tid in targets else TargetStatus.PENDING
+                status = tasks[tid].status if tid in tasks else TaskStatus.PENDING
                 node = _NodeItem(tid, status, x, y)
                 self._scene.addItem(node)
                 node_positions[tid] = (x + NODE_WIDTH / 2, y + NODE_HEIGHT / 2)
-                node_items[tid] = node
 
-        # Draw edges
-        for tid in dag.get_all_targets():
+        for tid in dag.get_all_tasks():
             deps = dag.get_dependencies(tid)
             if tid not in node_positions:
                 continue
@@ -127,11 +119,9 @@ class DAGViewWidget(QWidget):
                 dx, dy = node_positions[dep_id]
                 self._draw_arrow(dx + NODE_WIDTH / 2, dy, tx - NODE_WIDTH / 2, ty)
 
-        # Fit view
         self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
     def _draw_arrow(self, x1: float, y1: float, x2: float, y2: float) -> None:
-        """Draw an arrow from (x1,y1) to (x2,y2)."""
         pen = QPen(QColor(120, 120, 120), 1.5)
 
         path = QPainterPath()
@@ -142,7 +132,6 @@ class DAGViewWidget(QWidget):
         item.setPen(pen)
         self._scene.addItem(item)
 
-        # Arrowhead
         angle = math.atan2(y2 - y1, x2 - x1)
         arrow_size = 8
         p1 = QPointF(

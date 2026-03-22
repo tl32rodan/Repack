@@ -1,9 +1,9 @@
-"""DAG builder and topological sort for kit targets."""
+"""DAG builder and topological sort for scope-based tasks."""
 
 from collections import defaultdict, deque
 from typing import Dict, List, Set
 
-from kitdag.core.target import KitTarget
+from kitdag.core.task import Task
 
 
 class CyclicDependencyError(Exception):
@@ -11,48 +11,42 @@ class CyclicDependencyError(Exception):
 
 
 class DAGBuilder:
-    """Builds a kit-level DAG from step dependencies.
+    """Builds and manages the task-level DAG.
 
-    Each node is one KitTarget (one per kit/step). Edges represent
-    kit-level dependencies declared in the pipeline steps section.
+    Nodes are Tasks (identified by task.id).
+    Edges are concrete dependencies resolved from flow Dependency declarations.
     """
 
     def __init__(self) -> None:
-        # adjacency: target_id -> set of target_ids it depends on
         self._deps: Dict[str, Set[str]] = defaultdict(set)
-        # reverse adjacency: target_id -> set of target_ids depending on it
         self._rdeps: Dict[str, Set[str]] = defaultdict(set)
-        self._all_targets: Dict[str, KitTarget] = {}
+        self._all_tasks: Dict[str, Task] = {}
 
-    def add_targets(self, targets: List[KitTarget]) -> None:
-        """Register targets in the graph."""
-        for t in targets:
-            self._all_targets[t.id] = t
+    def add_tasks(self, tasks: List[Task]) -> None:
+        """Register tasks as nodes in the graph."""
+        for t in tasks:
+            self._all_tasks[t.id] = t
             if t.id not in self._deps:
                 self._deps[t.id] = set()
 
-    def build_edges(self, kit_dependencies: Dict[str, List[str]]) -> None:
-        """Build edges from kit-level dependencies.
-
-        Args:
-            kit_dependencies: {kit_name: [dependency_kit_names]}
-        """
-        for kit_name, dep_kit_names in kit_dependencies.items():
-            if kit_name not in self._all_targets:
+    def set_edges(self, edges: Dict[str, Set[str]]) -> None:
+        """Set dependency edges (task_id -> set of dependency task_ids)."""
+        for tid, dep_ids in edges.items():
+            if tid not in self._all_tasks:
                 continue
-            for dep_kit_name in dep_kit_names:
-                if dep_kit_name not in self._all_targets:
+            for dep_id in dep_ids:
+                if dep_id not in self._all_tasks:
                     continue
-                self._deps[kit_name].add(dep_kit_name)
-                self._rdeps[dep_kit_name].add(kit_name)
+                self._deps[tid].add(dep_id)
+                self._rdeps[dep_id].add(tid)
 
     def topological_sort(self) -> List[str]:
-        """Return target IDs in dependency-respecting execution order.
+        """Return task IDs in dependency-respecting execution order.
 
-        Uses Kahn's algorithm. Raises CyclicDependencyError if a cycle exists.
+        Uses Kahn's algorithm. Raises CyclicDependencyError if cycle detected.
         """
         in_degree: Dict[str, int] = {}
-        for tid in self._all_targets:
+        for tid in self._all_tasks:
             in_degree[tid] = len(self._deps.get(tid, set()))
 
         queue = deque(tid for tid, deg in in_degree.items() if deg == 0)
@@ -66,34 +60,34 @@ class DAGBuilder:
                 if in_degree[dependent] == 0:
                     queue.append(dependent)
 
-        if len(result) != len(self._all_targets):
-            missing = set(self._all_targets) - set(result)
+        if len(result) != len(self._all_tasks):
+            missing = set(self._all_tasks) - set(result)
             raise CyclicDependencyError(
-                f"Cycle detected involving targets: {missing}"
+                f"Cycle detected involving tasks: {missing}"
             )
 
         return result
 
-    def get_dependencies(self, target_id: str) -> Set[str]:
-        """Get direct dependencies of a target."""
-        return self._deps.get(target_id, set())
+    def get_dependencies(self, task_id: str) -> Set[str]:
+        """Get direct dependencies of a task."""
+        return self._deps.get(task_id, set())
 
-    def get_dependents(self, target_id: str) -> Set[str]:
-        """Get direct dependents of a target."""
-        return self._rdeps.get(target_id, set())
+    def get_dependents(self, task_id: str) -> Set[str]:
+        """Get direct dependents of a task."""
+        return self._rdeps.get(task_id, set())
 
-    def get_all_targets(self) -> Dict[str, KitTarget]:
-        """Return all registered targets."""
-        return dict(self._all_targets)
+    def get_all_tasks(self) -> Dict[str, Task]:
+        """Return all registered tasks."""
+        return dict(self._all_tasks)
 
     def get_execution_stages(self) -> List[List[str]]:
-        """Return targets grouped by execution stage (parallelizable).
+        """Return tasks grouped by execution stage (parallelizable).
 
-        Each stage contains targets that can run in parallel.
-        Stage N+1 targets depend only on stage <= N targets.
+        Each stage contains tasks that can run in parallel.
+        Stage N+1 tasks depend only on stage <= N tasks.
         """
         in_degree: Dict[str, int] = {}
-        for tid in self._all_targets:
+        for tid in self._all_tasks:
             in_degree[tid] = len(self._deps.get(tid, set()))
 
         current = [tid for tid, deg in in_degree.items() if deg == 0]

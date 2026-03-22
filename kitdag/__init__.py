@@ -1,3 +1,3 @@
-"""kitdag - Kit generation DAG platform."""
+"""kitdag - Universal DAG platform for kit generation pipelines."""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

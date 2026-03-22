@@ -1,10 +1,10 @@
-"""Tests for StateManager with input-hash change detection."""
+"""Tests for StateManager with scoped tasks."""
 
 import os
 import tempfile
 import unittest
 
-from kitdag.core.target import KitTarget, PvtStatus, TargetStatus
+from kitdag.core.task import Task, TaskStatus, VariantDetail
 from kitdag.state.manager import StateManager
 
 
@@ -20,68 +20,74 @@ class TestStateManager(unittest.TestCase):
 
     def test_save_and_load(self):
         state = StateManager(self.tmpdir)
-        targets = [
-            KitTarget("kitA", status=TargetStatus.PASS, input_hash="abc123"),
+        tasks = [
+            Task("extract", scope={"lib": "lib_a", "branch": "ss"},
+                 status=TaskStatus.PASS, input_hash="abc123"),
         ]
-        state.set_targets(targets)
+        state.set_tasks(tasks)
         state.save()
 
         state2 = StateManager(self.tmpdir)
         loaded = state2.load()
-        self.assertIn("kitA", loaded)
-        self.assertEqual(loaded["kitA"].status, TargetStatus.PASS)
-        self.assertEqual(loaded["kitA"].input_hash, "abc123")
+        tid = tasks[0].id
+        self.assertIn(tid, loaded)
+        self.assertEqual(loaded[tid].status, TaskStatus.PASS)
+        self.assertEqual(loaded[tid].input_hash, "abc123")
+        self.assertEqual(loaded[tid].scope, {"lib": "lib_a", "branch": "ss"})
 
-    def test_save_and_load_with_pvt_details(self):
+    def test_save_and_load_variant_details(self):
         state = StateManager(self.tmpdir)
-        targets = [
-            KitTarget(
-                "liberty",
-                status=TargetStatus.PASS,
+        tasks = [
+            Task(
+                "compile",
+                scope={"lib": "lib_a", "branch": "ss"},
+                status=TaskStatus.FAIL,
                 input_hash="abc",
-                pvt_details=[
-                    PvtStatus("ss_0p75v", ok=True),
-                    PvtStatus("tt_0p85v", ok=False, missing_files=["tt.lib"]),
+                variant_details=[
+                    VariantDetail("ss_0p75v", ".lib", ok=True),
+                    VariantDetail("ss_0p75v", ".db", ok=False, message="missing"),
                 ],
             ),
         ]
-        state.set_targets(targets)
+        state.set_tasks(tasks)
         state.save()
 
         state2 = StateManager(self.tmpdir)
         loaded = state2.load()
-        t = loaded["liberty"]
-        self.assertEqual(len(t.pvt_details), 2)
-        self.assertTrue(t.pvt_details[0].ok)
-        self.assertEqual(t.pvt_details[0].pvt, "ss_0p75v")
-        self.assertFalse(t.pvt_details[1].ok)
+        tid = tasks[0].id
+        t = loaded[tid]
+        self.assertEqual(len(t.variant_details), 2)
+        self.assertTrue(t.variant_details[0].ok)
+        self.assertEqual(t.variant_details[0].variant, "ss_0p75v")
+        self.assertEqual(t.variant_details[0].product, ".lib")
+        self.assertFalse(t.variant_details[1].ok)
 
     def test_summary(self):
         state = StateManager(self.tmpdir)
-        state.set_targets([
-            KitTarget("a", status=TargetStatus.PASS),
-            KitTarget("b", status=TargetStatus.FAIL),
-            KitTarget("c", status=TargetStatus.PASS),
+        state.set_tasks([
+            Task("a", status=TaskStatus.PASS),
+            Task("b", status=TaskStatus.FAIL),
+            Task("c", status=TaskStatus.PASS),
         ])
         s = state.summary()
         self.assertEqual(s["PASS"], 2)
         self.assertEqual(s["FAIL"], 1)
 
-    def test_error_message_preserved(self):
+    def test_per_lib_task(self):
+        """Task with only lib scope (no branch)."""
         state = StateManager(self.tmpdir)
-        state.set_targets([
-            KitTarget("kitA", status=TargetStatus.FAIL,
-                      error_message="PVT check: 2/3"),
-        ])
+        tasks = [
+            Task("merge", scope={"lib": "lib_a"},
+                 status=TaskStatus.PASS, input_hash="xyz"),
+        ]
+        state.set_tasks(tasks)
         state.save()
 
         state2 = StateManager(self.tmpdir)
         loaded = state2.load()
-        self.assertEqual(loaded["kitA"].error_message, "PVT check: 2/3")
-
-    def test_state_path(self):
-        state = StateManager(self.tmpdir)
-        self.assertTrue(state.state_path.endswith("kitdag_status.csv"))
+        tid = tasks[0].id
+        self.assertIn(tid, loaded)
+        self.assertEqual(loaded[tid].scope, {"lib": "lib_a"})
 
 
 if __name__ == "__main__":
