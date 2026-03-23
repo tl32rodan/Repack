@@ -1,108 +1,78 @@
-"""Tests for DAG builder and topological sort (kit-level)."""
+"""Tests for DAG builder with scope-based tasks."""
 
 import unittest
 
 from kitdag.core.dag import CyclicDependencyError, DAGBuilder
-from kitdag.core.target import KitTarget
+from kitdag.core.task import Task
 
 
 class TestDAGBuilder(unittest.TestCase):
 
     def test_no_dependencies(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B")]
-        dag.add_targets(targets)
-        dag.build_edges({})
-
+        tasks = [Task("A"), Task("B")]
+        dag.add_tasks(tasks)
         order = dag.topological_sort()
         self.assertEqual(set(order), {"A", "B"})
 
     def test_simple_dependency(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B")]
-        dag.add_targets(targets)
-        dag.build_edges({"B": ["A"]})
-
+        tasks = [Task("A"), Task("B")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"B": {"A"}})
         order = dag.topological_sort()
         self.assertLess(order.index("A"), order.index("B"))
 
-    def test_chain_dependency(self):
-        """A -> B -> C"""
+    def test_chain(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B"), KitTarget("C")]
-        dag.add_targets(targets)
-        dag.build_edges({"B": ["A"], "C": ["B"]})
-
+        tasks = [Task("A"), Task("B"), Task("C")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"B": {"A"}, "C": {"B"}})
         order = dag.topological_sort()
         self.assertLess(order.index("A"), order.index("B"))
         self.assertLess(order.index("B"), order.index("C"))
 
     def test_cycle_detection(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B")]
-        dag.add_targets(targets)
-        dag.build_edges({"A": ["B"], "B": ["A"]})
-
+        tasks = [Task("A"), Task("B")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"A": {"B"}, "B": {"A"}})
         with self.assertRaises(CyclicDependencyError):
             dag.topological_sort()
 
     def test_execution_stages(self):
-        """Targets in same stage have no inter-dependencies."""
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B"), KitTarget("C")]
-        dag.add_targets(targets)
-        dag.build_edges({"C": ["A", "B"]})
-
+        tasks = [Task("A"), Task("B"), Task("C")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"C": {"A", "B"}})
         stages = dag.get_execution_stages()
         self.assertEqual(len(stages), 2)
         self.assertIn("A", stages[0])
         self.assertIn("B", stages[0])
         self.assertIn("C", stages[1])
 
-    def test_diamond_dependency(self):
-        """A -> B, A -> C, B -> D, C -> D."""
+    def test_scoped_tasks(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B"), KitTarget("C"), KitTarget("D")]
-        dag.add_targets(targets)
-        dag.build_edges({
-            "B": ["A"],
-            "C": ["A"],
-            "D": ["B", "C"],
-        })
-
+        t1 = Task("extract", scope={"lib": "a", "branch": "ss"})
+        t2 = Task("char", scope={"lib": "a", "branch": "ss"})
+        dag.add_tasks([t1, t2])
+        dag.set_edges({t2.id: {t1.id}})
         order = dag.topological_sort()
-        self.assertLess(order.index("A"), order.index("B"))
-        self.assertLess(order.index("A"), order.index("C"))
-        self.assertLess(order.index("B"), order.index("D"))
-        self.assertLess(order.index("C"), order.index("D"))
+        self.assertLess(order.index(t1.id), order.index(t2.id))
 
     def test_get_dependencies(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B"), KitTarget("C")]
-        dag.add_targets(targets)
-        dag.build_edges({"C": ["A", "B"]})
-
-        deps = dag.get_dependencies("C")
-        self.assertEqual(deps, {"A", "B"})
+        tasks = [Task("A"), Task("B"), Task("C")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"C": {"A", "B"}})
+        self.assertEqual(dag.get_dependencies("C"), {"A", "B"})
 
     def test_get_dependents(self):
         dag = DAGBuilder()
-        targets = [KitTarget("A"), KitTarget("B")]
-        dag.add_targets(targets)
-        dag.build_edges({"B": ["A"]})
-
-        dependents = dag.get_dependents("A")
-        self.assertIn("B", dependents)
-
-    def test_unknown_dependency_ignored(self):
-        """Dependencies on non-existent kits are silently ignored."""
-        dag = DAGBuilder()
-        targets = [KitTarget("A")]
-        dag.add_targets(targets)
-        dag.build_edges({"A": ["nonexistent"]})
-
-        order = dag.topological_sort()
-        self.assertEqual(order, ["A"])
+        tasks = [Task("A"), Task("B")]
+        dag.add_tasks(tasks)
+        dag.set_edges({"B": {"A"}})
+        self.assertIn("B", dag.get_dependents("A"))
 
 
 if __name__ == "__main__":

@@ -1,25 +1,24 @@
-"""Filter bar widget for searching and filtering kits/targets."""
+"""Filter bar widget for searching and filtering tasks."""
 
 from typing import Optional
 
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QWidget,
 )
 
-from kitdag.core.target import TargetStatus
+from kitdag.core.task import TaskStatus
 
 
 class FilterBarWidget(QWidget):
     """Search and filter bar for the summary table."""
 
     filter_changed = Signal(str)               # text filter
-    status_filter_changed = Signal(list)        # list of TargetStatus to show
+    status_filter_changed = Signal(list)        # list of TaskStatus to show
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -29,7 +28,7 @@ class FilterBarWidget(QWidget):
         # Text search
         layout.addWidget(QLabel("Search:"))
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Filter by kit name...")
+        self._search.setPlaceholderText("Filter by lib name...")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self.filter_changed)
         layout.addWidget(self._search, stretch=1)
@@ -37,8 +36,8 @@ class FilterBarWidget(QWidget):
         # Status filter checkboxes
         layout.addWidget(QLabel("Show:"))
         self._status_checks = {}
-        for status in [TargetStatus.PASS, TargetStatus.FAIL,
-                       TargetStatus.PENDING, TargetStatus.SKIP]:
+        for status in [TaskStatus.PASS, TaskStatus.FAIL,
+                       TaskStatus.PENDING, TaskStatus.SKIP]:
             cb = QCheckBox(status.value)
             cb.setChecked(True)
             cb.stateChanged.connect(self._on_status_filter_changed)
